@@ -106,15 +106,7 @@ class DshRuntimeBridge(
             val workspace = checkpoints.ensureWorkspace(projectId)
             checkpoints.createCheckpoint(projectId, workspace)
             val before = checkpoints.snapshot(workspace)
-            val baseRoute = DshRouteMapper.forProfile(provider)
-            openRouterGateway = if (
-                provider.kind == ProviderKind.LLM_ROUTER && provider.openRouterProviders.isNotEmpty()
-            ) OpenRouterRoutingGateway(provider, secret).start() else null
-            val route = if (openRouterGateway != null && baseRoute.custom != null) {
-                baseRoute.copy(custom = baseRoute.custom.copy(baseUrl = openRouterGateway!!.url))
-            } else {
-                baseRoute
-            }
+            val route = DshRouteMapper.forProfile(provider)
             writeDshSettings(installed.rootfs, route, provider)
             val environment = linkedMapOf(
                 "DSH_HOME" to DSH_HOME_GUEST_PATH,
@@ -123,6 +115,9 @@ class DshRuntimeBridge(
                 "DSH_PERMISSION_MODE" to "danger-full-access",
                 route.keyEnv to secret,
             )
+            if (provider.kind == ProviderKind.LLM_ROUTER) {
+                environment["OPENROUTER_API_KEY"] = secret
+            }
             if (route.keyEnv != FALLBACK_KEY_ENV) environment.remove(FALLBACK_KEY_ENV)
 
             val guestWorkspacePath = "/workspace/$projectSlug"
@@ -698,7 +693,7 @@ internal object DshRouteMapper {
                 name = "mh-openrouter",
                 keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
                 defaultModel = model,
-                custom = DshCustomRoute("anthropic-messages", profile.resolvedBaseUrl),
+                custom = DshCustomRoute("openai-completions", "https://openrouter.ai/api/v1"),
             )
             ProviderKind.KIMI -> DshRoute(
                 name = "mh-kimi",
