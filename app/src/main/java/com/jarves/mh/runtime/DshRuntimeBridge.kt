@@ -791,6 +791,10 @@ internal class DshSdkProtocolParser(private val expectedSessionId: String) {
     private val toolNames = mutableMapOf<String, String>()
 
     fun parseLine(line: String): DshSdkProtocolEvent {
+        val lower = line.lowercase()
+        if ("resourceexhausted" in lower || "resource_exhausted" in lower || "16/16" in lower) {
+            return DshSdkProtocolEvent.Failed("NVIDIA NIM concurrency limit reached (ResourceExhausted 16/16).")
+        }
         val frame = runCatching { JSONObject(line) }.getOrNull()
             ?: return if (line.startsWith("dsh:", ignoreCase = true)) {
                 DshSdkProtocolEvent.Failed(

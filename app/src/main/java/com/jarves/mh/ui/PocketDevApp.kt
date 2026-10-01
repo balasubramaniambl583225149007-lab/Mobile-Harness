@@ -355,6 +355,9 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onRemoveAttachment = viewModel::removePendingAttachment,
             onOpenAttachment = viewModel::openChatAttachment,
             onBuildAndRunAndroid = viewModel::buildAndRunAndroidApp,
+            onFallbackFromNimToOpenRouter = viewModel::fallbackFromNimToOpenRouter,
+            onFallbackFromNimToCustom = viewModel::fallbackFromNimToCustomProvider,
+            onDismissNimBanner = viewModel::dismissNimConcurrencyBanner,
         )
         else -> RootScreenHost(state, viewModel, projectsListState)
     }
@@ -2094,6 +2097,9 @@ private fun RootScreenHost(
                     onSaveProvider = { profile, key ->
                         viewModel.updateProvider(profile, key)
                     },
+                    onFallbackFromNimToOpenRouter = viewModel::fallbackFromNimToOpenRouter,
+                    onFallbackFromNimToCustom = viewModel::fallbackFromNimToCustomProvider,
+                    onDismissNimBanner = viewModel::dismissNimConcurrencyBanner,
                     onDiscoverModels = viewModel::discoverModels,
                     onValidateProvider = viewModel::validateProvider,
                     onPing = viewModel::pingApi,
@@ -3838,6 +3844,9 @@ private fun WorkspaceScreen(
     onRemoveAttachment: (String) -> Unit,
     onOpenAttachment: (ChatAttachment) -> Unit,
     onBuildAndRunAndroid: () -> Unit,
+    onFallbackFromNimToOpenRouter: () -> Unit = {},
+    onFallbackFromNimToCustom: () -> Unit = {},
+    onDismissNimBanner: () -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -4039,73 +4048,149 @@ private fun WorkspaceScreen(
             }
         },
     ) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding)) {
-            when (selectedTab) {
-                WorkspaceTab.CHAT -> ChatTab(
-                    state.messages,
-                    state.pendingApproval,
-                    state.liveProcess,
-                    state.isRunning,
-                    onSend,
-                    onStop,
-                    onApproval,
-                    listState = chatListState,
-                    taskStartedAtMillis = state.workSegmentStartedAtMillis ?: state.taskStartedAtMillis,
-                    taskFinishedAtMillis = state.taskFinishedAtMillis,
-                    thinkingActive = state.liveThinking,
-                    agentKind = state.agentKind,
-                    pendingAttachments = state.pendingAttachments,
-                    onAttach = {
-                        attachmentLauncher.launch(arrayOf("image/*", "text/*", "application/json", "application/xml"))
-                    },
-                    onRemoveAttachment = onRemoveAttachment,
-                    onOpenAttachment = onOpenAttachment,
-                    onRunInTerminal = { command ->
-                        selectedTab = WorkspaceTab.TERMINAL
-                        onTerminalOpened()
-                        onTerminalPrepare(command)
-                    },
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            if (state.nimConcurrencyLimitReached) {
+                NimConcurrencyBanner(
+                    onFallbackOpenRouter = onFallbackFromNimToOpenRouter,
+                    onFallbackCustom = onFallbackFromNimToCustom,
+                    onDismiss = onDismissNimBanner,
                 )
-                WorkspaceTab.FILES -> FilesTab(
-                    files = state.workspaceFiles,
-                    loading = state.filesLoading,
-                    suggestedProjectRoot = state.suggestedProjectRoot,
-                    onRefresh = onRefreshFiles,
-                    onOpenFile = onOpenFile,
-                    onUseSuggestedProjectRoot = onUseSuggestedProjectRoot,
-                    onExport = {
-                        exportProjectLauncher.launch("${state.activeProject?.slug ?: "project"}.zip")
-                    },
+            }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                when (selectedTab) {
+                    WorkspaceTab.CHAT -> ChatTab(
+                        state.messages,
+                        state.pendingApproval,
+                        state.liveProcess,
+                        state.isRunning,
+                        onSend,
+                        onStop,
+                        onApproval,
+                        listState = chatListState,
+                        taskStartedAtMillis = state.workSegmentStartedAtMillis ?: state.taskStartedAtMillis,
+                        taskFinishedAtMillis = state.taskFinishedAtMillis,
+                        thinkingActive = state.liveThinking,
+                        agentKind = state.agentKind,
+                        pendingAttachments = state.pendingAttachments,
+                        onAttach = {
+                            attachmentLauncher.launch(arrayOf("image/*", "text/*", "application/json", "application/xml"))
+                        },
+                        onRemoveAttachment = onRemoveAttachment,
+                        onOpenAttachment = onOpenAttachment,
+                        onRunInTerminal = { command ->
+                            selectedTab = WorkspaceTab.TERMINAL
+                            onTerminalOpened()
+                            onTerminalPrepare(command)
+                        },
+                    )
+                    WorkspaceTab.FILES -> FilesTab(
+                        files = state.workspaceFiles,
+                        loading = state.filesLoading,
+                        suggestedProjectRoot = state.suggestedProjectRoot,
+                        onRefresh = onRefreshFiles,
+                        onOpenFile = onOpenFile,
+                        onUseSuggestedProjectRoot = onUseSuggestedProjectRoot,
+                        onExport = {
+                            exportProjectLauncher.launch("${state.activeProject?.slug ?: "project"}.zip")
+                        },
+                    )
+                    WorkspaceTab.TERMINAL -> TerminalScreen(
+                        lines = state.projectTerminalLines,
+                        isRunning = state.projectTerminalRunning,
+                        onRun = onTerminalRun,
+                        onInput = onTerminalInput,
+                        onInterrupt = onTerminalInterrupt,
+                        onClear = onTerminalClear,
+                        onToggleTheme = {},
+                        themeMode = state.themeMode,
+                        title = "Project Terminal",
+                        subtitle = "${state.projectTerminalCwd} · Ubuntu PRoot",
+                        liveOutput = state.projectTerminalLiveOutput,
+                        currentCommand = state.projectTerminalCommand,
+                        commandDraft = state.projectTerminalDraft,
+                        onCommandDraftConsumed = onTerminalDraftConsumed,
+                        promptPath = state.projectTerminalCwd,
+                        onStop = onTerminalStop,
+                        showThemeAction = false,
+                        showQuickCommands = false,
+                        compactHeader = true,
+                    )
+                    WorkspaceTab.CHANGES -> ChangesTab(
+                        state.changes,
+                        onUndoChanges,
+                        onKeepChanges,
+                        onUndoFileChange,
+                        onKeepFileChange,
+                    )
+                    WorkspaceTab.PREVIEW -> PreviewTab(state.previewReady, state.previewUrl)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun NimConcurrencyBanner(
+    onFallbackOpenRouter: () -> Unit,
+    onFallbackCustom: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 6.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.95f),
+        tonalElevation = 4.dp,
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(20.dp),
                 )
-                WorkspaceTab.TERMINAL -> TerminalScreen(
-                    lines = state.projectTerminalLines,
-                    isRunning = state.projectTerminalRunning,
-                    onRun = onTerminalRun,
-                    onInput = onTerminalInput,
-                    onInterrupt = onTerminalInterrupt,
-                    onClear = onTerminalClear,
-                    onToggleTheme = {},
-                    themeMode = state.themeMode,
-                    title = "Project Terminal",
-                    subtitle = "${state.projectTerminalCwd} · Ubuntu PRoot",
-                    liveOutput = state.projectTerminalLiveOutput,
-                    currentCommand = state.projectTerminalCommand,
-                    commandDraft = state.projectTerminalDraft,
-                    onCommandDraftConsumed = onTerminalDraftConsumed,
-                    promptPath = state.projectTerminalCwd,
-                    onStop = onTerminalStop,
-                    showThemeAction = false,
-                    showQuickCommands = false,
-                    compactHeader = true,
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "NVIDIA NIM limit reached (ResourceExhausted 16/16)",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.weight(1f),
                 )
-                WorkspaceTab.CHANGES -> ChangesTab(
-                    state.changes,
-                    onUndoChanges,
-                    onKeepChanges,
-                    onUndoFileChange,
-                    onKeepFileChange,
-                )
-                WorkspaceTab.PREVIEW -> PreviewTab(state.previewReady, state.previewUrl)
+                IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Dismiss",
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "NVIDIA NIM reached its concurrency limit (16/16). Choose a fallback provider to continue without waiting.",
+                fontSize = 11.5.sp,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onFallbackOpenRouter,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    modifier = Modifier.height(32.dp),
+                ) {
+                    Text("Use OpenRouter", fontSize = 11.5.sp)
+                }
+                OutlinedButton(
+                    onClick = onFallbackCustom,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    modifier = Modifier.height(32.dp),
+                ) {
+                    Text("Use Custom API", fontSize = 11.5.sp)
+                }
             }
         }
     }

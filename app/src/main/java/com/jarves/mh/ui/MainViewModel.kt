@@ -243,6 +243,7 @@ data class AppUiState(
     val appUpdateDownloadedBytes: Long = 0L,
     val appUpdateTotalBytes: Long = -1L,
     val appUpdateError: String? = null,
+    val nimConcurrencyLimitReached: Boolean = false,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -3402,6 +3403,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 is RuntimeEvent.SessionFailed -> {
                     val finishedAt = System.currentTimeMillis()
+                    val isNimLimit = event.reason.contains("ResourceExhausted", ignoreCase = true) ||
+                        event.reason.contains("16/16", ignoreCase = true)
                     attachTaskDuration(
                         finishWorkSegment(
                             appendWorkItem(current, ActivityItem("Task stopped", event.reason)),
@@ -3412,7 +3415,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         isRunning = false,
                         activeSessionId = null,
                         pendingApproval = null,
-                        toastMessage = event.reason.takeIf { reason ->
+                        nimConcurrencyLimitReached = isNimLimit,
+                        toastMessage = if (isNimLimit) "NVIDIA NIM concurrency limit reached (16/16)" else event.reason.takeIf { reason ->
                             reason.contains("user not found", true) ||
                                 reason.contains("API key", true) ||
                                 reason.contains("authentication", true)
@@ -3442,6 +3446,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val current = _state.value
         if (current.agentKind == AgentKind.ANTIGRAVITY) return false
         if (!current.isRunning || current.activeSessionId != event.sessionId) return false
+        if (event.reason.contains("ResourceExhausted", ignoreCase = true) ||
+            event.reason.contains("16/16", ignoreCase = true)) return false
         if (!isApiKeyFailure(event.reason)) return false
         val request = activeRuntimeRequest ?: return false
         val credentials = vault.credentials(request.provider.kind.name)
@@ -3532,6 +3538,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             current.copy(projectChats = chats)
         }
         preferences.saveProjectChats(project.id, _state.value.projectChats)
+    }
+
+    fun fallbackFromNimToOpenRouter() {
+        _state.update { it.copy(nimConcurrencyLimitReached = false) }
+        val current = _state.value
+        val openRouterProfile = preferences.loadProvider(vault, current.agentKind).takeIf { it.kind == ProviderKind.LLM_ROUTER }
+            ?: ProviderProfile(ProviderKind.LLM_ROUTER)
+        val secret = vault.get(ProviderKind.LLM_ROUTER.name).orEmpty()
+        updateProvider(openRouterProfile, secret)
+    }
+
+    fun fallbackFromNimToCustomProvider() {
+        _state.update { it.copy(nimConcurrencyLimitReached = false) }
+        val current = _state.value
+        val customProfile = preferences.loadProvider(vault, current.agentKind).takeIf { it.kind == ProviderKind.CUSTOM }
+            ?: ProviderProfile(ProviderKind.CUSTOM)
+        val secret = vault.get(ProviderKind.CUSTOM.name).orEmpty()
+        updateProvider(customProfile, secret)
+    }
+
+    fun dismissNimConcurrencyBanner() {
+        _state.update { it.copy(nimConcurrencyLimitReached = false) }
     }
 
     companion object {

@@ -46,6 +46,8 @@ internal object ProviderRuntimeErrorDetector {
             }
         }.lowercase()
         return when {
+            "resourceexhausted" in combined || "resource_exhausted" in combined || "16/16" in combined ->
+                "NVIDIA NIM concurrency limit reached (ResourceExhausted 16/16)."
             "user not found" in combined -> "User not found. Check the API key and provider account."
             "authentication_failed" in combined ||
                 "authentication failed" in combined ||

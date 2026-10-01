@@ -174,6 +174,9 @@ fun AgentScreen(
     onRefreshAntigravityModels: () -> Unit = {},
     onSetAntigravityModel: (String) -> Unit = {},
     onSetAntigravityEffort: (String) -> Unit = {},
+    onFallbackFromNimToOpenRouter: () -> Unit = {},
+    onFallbackFromNimToCustom: () -> Unit = {},
+    onDismissNimBanner: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var selectedKind by rememberSaveable(state.provider.kind) { mutableStateOf(state.provider.kind) }
@@ -805,6 +808,15 @@ fun AgentScreen(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            if (state.nimConcurrencyLimitReached) {
+                item {
+                    NimConcurrencyBanner(
+                        onFallbackOpenRouter = onFallbackFromNimToOpenRouter,
+                        onFallbackCustom = onFallbackFromNimToCustom,
+                        onDismiss = onDismissNimBanner,
+                    )
+                }
+            }
             // ── 1. Compact 3-Way Segmented Engine Selector ──
             item {
                 Column(modifier = Modifier.fillMaxWidth()) {
