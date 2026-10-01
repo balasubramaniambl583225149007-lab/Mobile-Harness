@@ -707,12 +707,7 @@ internal object DshRouteMapper {
                 defaultModel = model,
                 custom = DshCustomRoute(profile.dshApi.ifBlank { "anthropic-messages" }, profile.resolvedBaseUrl),
             )
-            ProviderKind.OPENCODE_ZEN -> DshRoute(
-                name = "opencode-zen",
-                keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
-                defaultModel = model,
-                custom = DshCustomRoute("openai-responses", profile.resolvedBaseUrl),
-            )
+            ProviderKind.OPENCODE_ZEN -> throw IllegalArgumentException("OpenCode Zen is only supported in the OpenCode agent tab.")
             ProviderKind.NVIDIA_NIM -> DshRoute(
                 name = "nvidia-nim",
                 keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,

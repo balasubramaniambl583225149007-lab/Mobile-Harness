@@ -155,11 +155,6 @@ class ProviderApiClient {
                 if (apiKey.isNotBlank()) {
                     setRequestProperty("Authorization", "Bearer $apiKey")
                 }
-                if (endpoint.startsWith("https://opencode.ai/zen/")) {
-                    // OpenCode Zen expects requests to identify the OpenCode client and session.
-                    setRequestProperty("User-Agent", "opencode/1.18.20")
-                    setRequestProperty("x-session-id", "session-${UUID.randomUUID()}")
-                }
                 if (apiKey.isNotBlank() && protocol != ProviderProtocol.OPENROUTER && protocol != ProviderProtocol.OPENAI_CHAT && protocol != ProviderProtocol.OPENAI_RESPONSES) {
                     setRequestProperty("x-api-key", apiKey)
                     setRequestProperty("anthropic-version", "2023-06-01")

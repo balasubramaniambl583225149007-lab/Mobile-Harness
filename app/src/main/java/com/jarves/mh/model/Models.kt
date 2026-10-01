@@ -87,20 +87,17 @@ val DEEPSEEK_HARNESS_PROVIDERS: Set<ProviderKind> = setOf(
     ProviderKind.ANTHROPIC,
     ProviderKind.LLM_ROUTER,
     ProviderKind.KIMI,
-    ProviderKind.OPENCODE_ZEN,
     ProviderKind.NVIDIA_NIM,
     ProviderKind.CUSTOM,
 )
 
 val DSH_PROTOCOL_PROVIDERS: Set<ProviderKind> = setOf(
     ProviderKind.KIMI,
-    ProviderKind.OPENCODE_ZEN,
     ProviderKind.NVIDIA_NIM,
     ProviderKind.CUSTOM,
 )
 
 fun defaultDshApiForProvider(kind: ProviderKind): String = when (kind) {
-    ProviderKind.OPENCODE_ZEN -> "openai-responses"
     ProviderKind.NVIDIA_NIM -> "openai-completions"
     else -> "anthropic-messages"
 }

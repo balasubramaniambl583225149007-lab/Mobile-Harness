@@ -220,12 +220,9 @@ class DshRouteMapperTest {
         assertNull(route.custom)
     }
 
-    @Test
-    fun zenUsesFixedUrlAndResponsesProtocol() {
-        val route = DshRouteMapper.forProfile(ProviderProfile(ProviderKind.OPENCODE_ZEN))
-        assertEquals("opencode-zen", route.name)
-        assertEquals("openai-responses", route.custom?.api)
-        assertEquals("https://opencode.ai/zen/v1", route.custom?.baseUrl)
+    @Test(expected = IllegalArgumentException::class)
+    fun zenIsRejectedForDeepSeekHarness() {
+        DshRouteMapper.forProfile(ProviderProfile(ProviderKind.OPENCODE_ZEN))
     }
 
     @Test
@@ -293,17 +290,17 @@ class AgentProviderPresetTest {
     }
 
     @Test
-    fun dshHarnessExcludesClaudeSubscription() {
+    fun dshHarnessExcludesClaudeSubscriptionAndZen() {
         assertFalse(ProviderKind.CLAUDE in DEEPSEEK_HARNESS_PROVIDERS)
-        assertTrue(ProviderKind.OPENCODE_ZEN in DEEPSEEK_HARNESS_PROVIDERS)
+        assertFalse(ProviderKind.OPENCODE_ZEN in DEEPSEEK_HARNESS_PROVIDERS)
         assertTrue(ProviderKind.DEEPSEEK in DEEPSEEK_HARNESS_PROVIDERS)
         assertTrue(ProviderKind.NVIDIA_NIM in DEEPSEEK_HARNESS_PROVIDERS)
-        assertEquals(7, DEEPSEEK_HARNESS_PROVIDERS.size)
+        assertEquals(6, DEEPSEEK_HARNESS_PROVIDERS.size)
     }
 
     @Test
-    fun openCodeZenIsOnlyShownForDeepSeekHarness() {
-        assertTrue(ProviderKind.OPENCODE_ZEN in providersForAgent(AgentKind.DEEPSEEK_HARNESS))
+    fun openCodeZenIsIsolatedFromOtherAgents() {
+        assertFalse(ProviderKind.OPENCODE_ZEN in providersForAgent(AgentKind.DEEPSEEK_HARNESS))
         assertFalse(ProviderKind.OPENCODE_ZEN in providersForAgent(AgentKind.CLAUDE_CODE))
     }
 
