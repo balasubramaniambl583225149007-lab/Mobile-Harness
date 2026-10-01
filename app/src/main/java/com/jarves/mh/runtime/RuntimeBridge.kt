@@ -62,7 +62,15 @@ object RuntimeLaunchConfigBuilder {
                 environment["ANTHROPIC_MODEL"] = profile.model
             }
             com.jarves.mh.model.ProviderProtocol.OPENROUTER -> {
-                environment["ANTHROPIC_BASE_URL"] = (localGatewayUrl ?: profile.resolvedBaseUrl).trimEnd('/')
+                val targetBaseUrl = (localGatewayUrl ?: profile.resolvedBaseUrl).trim().trimEnd('/')
+                val cleanBaseUrl = when {
+                    localGatewayUrl != null -> targetBaseUrl
+                    targetBaseUrl.endsWith("/api/v1") -> targetBaseUrl.removeSuffix("/v1")
+                    targetBaseUrl.endsWith("/v1") -> targetBaseUrl.removeSuffix("/v1") + "/api"
+                    targetBaseUrl == "https://openrouter.ai" || targetBaseUrl == "http://openrouter.ai" -> "$targetBaseUrl/api"
+                    else -> targetBaseUrl
+                }
+                environment["ANTHROPIC_BASE_URL"] = cleanBaseUrl
                 environment["ANTHROPIC_MODEL"] = profile.model
             }
             com.jarves.mh.model.ProviderProtocol.OPENAI_RESPONSES,
@@ -84,14 +92,15 @@ object RuntimeLaunchConfigBuilder {
             environment["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
             environment["CLAUDE_CODE_DISABLE_TOKEN_COUNTING"] = "1"
             environment["DISABLE_TELEMETRY"] = "1"
-            if (!authToken.isNullOrBlank()) {
-                environment["ANTHROPIC_AUTH_TOKEN"] = authToken
-                if (profile.kind == com.jarves.mh.model.ProviderKind.LLM_ROUTER) {
-                    environment["ANTHROPIC_API_KEY"] = ""
+            if (profile.kind == com.jarves.mh.model.ProviderKind.LLM_ROUTER || profile.kind.protocol == com.jarves.mh.model.ProviderProtocol.OPENROUTER) {
+                environment["ANTHROPIC_AUTH_TOKEN"] = authToken.orEmpty()
+                environment["ANTHROPIC_API_KEY"] = ""
+                if (!authToken.isNullOrBlank()) {
                     environment["OPENROUTER_API_KEY"] = authToken
-                } else {
-                    environment["ANTHROPIC_API_KEY"] = authToken
                 }
+            } else if (!authToken.isNullOrBlank()) {
+                environment["ANTHROPIC_AUTH_TOKEN"] = authToken
+                environment["ANTHROPIC_API_KEY"] = authToken
             }
         }
         return RuntimeLaunchConfig(
