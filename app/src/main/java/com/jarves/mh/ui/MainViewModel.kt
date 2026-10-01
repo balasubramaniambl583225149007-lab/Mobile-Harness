@@ -471,6 +471,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     var offset = 0L
                     val streamed = StringBuilder()
                     var autoConfirmed = false
+                    var lastUpdate = 0L
                     while (proc.isAlive || (native?.outputFile?.length() ?: 0L) > offset) {
                         val file = native?.outputFile
                         val available = (file?.length() ?: 0L) - offset
@@ -486,9 +487,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         if (count > 0) {
                             offset += count
                             streamed.append(bytes.decodeToString(0, count))
-                            _terminalLiveOutput.value = sanitizeTerminalOutput(streamed.toString())
-                                .trimEnd()
-                                .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
+                            val now = System.currentTimeMillis()
+                            if (now - lastUpdate >= 100L) {
+                                lastUpdate = now
+                                val tail = if (streamed.length > MAX_PROJECT_TERMINAL_OUTPUT * 2) {
+                                    streamed.substring(streamed.length - MAX_PROJECT_TERMINAL_OUTPUT * 2)
+                                } else {
+                                    streamed.toString()
+                                }
+                                _terminalLiveOutput.value = sanitizeTerminalOutput(tail)
+                                    .trimEnd()
+                                    .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
+                            }
                             if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, streamed.toString())) {
                                 proc.outputStream.write("y\n".toByteArray())
                                 proc.outputStream.flush()
@@ -683,6 +693,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         var offset = 0L
         val output = StringBuilder()
         var autoConfirmed = false
+        var lastUpdate = 0L
         while (process.isAlive || native.outputFile.length() > offset) {
             val available = native.outputFile.length() - offset
             if (available <= 0) {
@@ -697,22 +708,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (count > 0) {
                 offset += count
                 output.append(bytes.decodeToString(0, count))
-                val visible = sanitizeTerminalOutput(output.toString().substringBefore(marker))
-                    .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
-                if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, visible)) {
-                    process.outputStream.write("y\n".toByteArray())
-                    process.outputStream.flush()
-                    autoConfirmed = true
-                }
-                val detectedPreviewUrl = detectPreviewUrl(visible)
-                _state.update { current ->
-                    if (current.activeProject?.id == projectId) {
-                        current.copy(
-                            projectTerminalLiveOutput = visible,
-                            previewReady = current.previewReady || detectedPreviewUrl != null,
-                            previewUrl = detectedPreviewUrl ?: current.previewUrl,
-                        )
-                    } else current
+                val now = System.currentTimeMillis()
+                if (now - lastUpdate >= 100L) {
+                    lastUpdate = now
+                    val tail = if (output.length > MAX_PROJECT_TERMINAL_OUTPUT * 2) {
+                        output.substring(output.length - MAX_PROJECT_TERMINAL_OUTPUT * 2)
+                    } else {
+                        output.toString()
+                    }
+                    val visible = sanitizeTerminalOutput(tail.substringBefore(marker))
+                        .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
+                    if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, visible)) {
+                        process.outputStream.write("y\n".toByteArray())
+                        process.outputStream.flush()
+                        autoConfirmed = true
+                    }
+                    val detectedPreviewUrl = detectPreviewUrl(visible)
+                    _state.update { current ->
+                        if (current.activeProject?.id == projectId) {
+                            current.copy(
+                                projectTerminalLiveOutput = visible,
+                                previewReady = current.previewReady || detectedPreviewUrl != null,
+                                previewUrl = detectedPreviewUrl ?: current.previewUrl,
+                            )
+                        } else current
+                    }
                 }
             }
         }
