@@ -21,6 +21,7 @@ import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.ChatAttachment
 import com.jarves.mh.model.DevStack
+import com.jarves.mh.model.EditorTab
 import com.jarves.mh.model.Project
 import com.jarves.mh.model.ProjectKind
 import com.jarves.mh.model.ProjectChat
@@ -107,6 +108,36 @@ private fun antigravityModelWithEffort(model: String, effort: String): String? {
     return "${match.groupValues[1]}-$effort"
 }
 
+private const val MAX_EDITOR_INITIAL_BYTES = 1024 * 1024L // 1 MB
+
+private val BINARY_EXTENSIONS = setOf(
+    "png", "jpg", "jpeg", "gif", "ico", "webp", "bmp", "pdf",
+    "zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar",
+    "apk", "aab", "jar", "class", "dex", "so", "dylib", "dll", "exe",
+    "bin", "dat", "db", "sqlite", "sqlite3", "pyc", "pyo", "o", "a",
+    "ttf", "otf", "woff", "woff2", "eot", "mp3", "mp4", "wav", "ogg", "flac"
+)
+
+private fun isBinaryFile(file: File): Boolean {
+    val ext = file.extension.lowercase()
+    if (ext in BINARY_EXTENSIONS) return true
+    return runCatching {
+        file.inputStream().use { stream ->
+            val buf = ByteArray(minOf(file.length(), 8192L).coerceAtLeast(1L).toInt())
+            val read = stream.read(buf)
+            if (read <= 0) false else buf.take(read).any { it == 0.toByte() }
+        }
+    }.getOrDefault(false)
+}
+
+private data class LoadedEditorFile(
+    val content: String,
+    val isPartial: Boolean,
+    val isBinary: Boolean,
+    val totalSize: Long,
+    val modTime: Long,
+)
+
 private data class ProjectTerminalSnapshot(
     val lines: List<TerminalOutputLine> = emptyList(),
     val cwd: String = "/workspace",
@@ -180,6 +211,9 @@ data class AppUiState(
     val openedFilePath: String? = null,
     val openedFileContent: String? = null,
     val fileContentLoading: Boolean = false,
+    val openEditorTabs: List<EditorTab> = emptyList(),
+    val activeEditorTabPath: String? = null,
+    val diskConflictPath: String? = null,
     val messages: List<ChatMessage> = listOf(
         ChatMessage(fromUser = false, text = "Hi! Tell me what you want to build or change."),
     ),
@@ -2841,29 +2875,524 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openFile(entry: WorkspaceEntry) {
         if (entry.isDirectory) return
-        val project = _state.value.activeProject ?: return
-        _state.update { it.copy(openedFilePath = entry.path, openedFileContent = null, fileContentLoading = true) }
-        viewModelScope.launch {
-            val content = withContext(Dispatchers.IO) {
-                val file = File(projectWorkspaceRoot(project), entry.path)
-                runCatching {
-                    if (file.length() > 512_000L) {
-                        file.inputStream().use { stream ->
-                            val buf = ByteArray(512_000)
-                            val read = stream.read(buf)
-                            String(buf, 0, read)
-                        } + "\n\n[File truncated — too large to display fully]"
-                    } else {
-                        file.readText()
-                    }
-                }.getOrElse { "Could not read file: ${it.message}" }
-            }
-            _state.update { it.copy(openedFileContent = content, fileContentLoading = false) }
-        }
+        openEditorFile(entry.path)
     }
 
     fun closeFile() {
+        val current = _state.value.activeEditorTabPath
+        if (current != null) closeEditorTab(current)
         _state.update { it.copy(openedFilePath = null, openedFileContent = null, fileContentLoading = false) }
+    }
+
+    fun openEditorFile(relativePath: String) {
+        val project = _state.value.activeProject ?: return
+        val existing = _state.value.openEditorTabs.find { it.path == relativePath }
+        if (existing != null) {
+            selectEditorTab(relativePath)
+            return
+        }
+
+        viewModelScope.launch {
+            val root = projectWorkspaceRoot(project)
+            val file = File(root, relativePath).canonicalFile
+            if (!file.isFile || !file.toPath().startsWith(root.canonicalFile.toPath())) {
+                _state.update { it.copy(toastMessage = "File not found or invalid path") }
+                return@launch
+            }
+
+            val loaded = withContext(Dispatchers.IO) {
+                if (isBinaryFile(file)) {
+                    return@withContext LoadedEditorFile("", isPartial = false, isBinary = true, totalSize = file.length(), modTime = 0L)
+                }
+                val len = file.length()
+                val mod = file.lastModified()
+                if (len > MAX_EDITOR_INITIAL_BYTES) {
+                    val text = file.inputStream().use { stream ->
+                        val buf = ByteArray(MAX_EDITOR_INITIAL_BYTES.toInt())
+                        val read = stream.read(buf)
+                        String(buf, 0, read, Charsets.UTF_8)
+                    }
+                    LoadedEditorFile(text, isPartial = true, isBinary = false, totalSize = len, modTime = mod)
+                } else {
+                    val text = runCatching { file.readText(Charsets.UTF_8) }.getOrElse { "Could not read file: ${it.message}" }
+                    LoadedEditorFile(text, isPartial = false, isBinary = false, totalSize = len, modTime = mod)
+                }
+            }
+
+            if (loaded.isBinary) {
+                _state.update { it.copy(toastMessage = "Cannot open binary file: ${file.name}") }
+                return@launch
+            }
+
+            val newTab = EditorTab(
+                path = relativePath,
+                name = file.name,
+                content = loaded.content,
+                diskModifiedTime = loaded.modTime,
+                isModified = false,
+                isPartiallyLoaded = loaded.isPartial,
+                totalSizeBytes = loaded.totalSize,
+            )
+
+            _state.update { state ->
+                state.copy(
+                    openEditorTabs = state.openEditorTabs + newTab,
+                    activeEditorTabPath = relativePath,
+                    diskConflictPath = null,
+                    openedFilePath = relativePath,
+                    openedFileContent = loaded.content,
+                    fileContentLoading = false,
+                )
+            }
+        }
+    }
+
+    fun loadFullEditorFile(relativePath: String) {
+        val project = _state.value.activeProject ?: return
+        viewModelScope.launch {
+            val root = projectWorkspaceRoot(project)
+            val file = File(root, relativePath).canonicalFile
+            if (!file.isFile || !file.toPath().startsWith(root.canonicalFile.toPath())) return@launch
+            val (text, mod) = withContext(Dispatchers.IO) {
+                runCatching { file.readText(Charsets.UTF_8) to file.lastModified() }
+                    .getOrElse { "Could not load file: ${it.message}" to file.lastModified() }
+            }
+            _state.update { state ->
+                val updated = state.openEditorTabs.map { tab ->
+                    if (tab.path == relativePath) {
+                        tab.copy(
+                            content = text,
+                            diskModifiedTime = mod,
+                            isPartiallyLoaded = false,
+                            totalSizeBytes = file.length(),
+                        )
+                    } else tab
+                }
+                state.copy(openEditorTabs = updated)
+            }
+        }
+    }
+
+    fun selectEditorTab(relativePath: String) {
+        val project = _state.value.activeProject ?: return
+        val tab = _state.value.openEditorTabs.find { it.path == relativePath } ?: return
+        viewModelScope.launch {
+            val root = projectWorkspaceRoot(project)
+            val file = File(root, relativePath)
+            val conflict = withContext(Dispatchers.IO) {
+                file.isFile && file.lastModified() > tab.diskModifiedTime
+            }
+            _state.update { state ->
+                state.copy(
+                    activeEditorTabPath = relativePath,
+                    diskConflictPath = if (conflict) relativePath else null,
+                    openedFilePath = relativePath,
+                    openedFileContent = tab.content,
+                )
+            }
+        }
+    }
+
+    fun closeEditorTab(relativePath: String) {
+        _state.update { state ->
+            val remaining = state.openEditorTabs.filter { it.path != relativePath }
+            val newActive = if (state.activeEditorTabPath == relativePath) {
+                remaining.lastOrNull()?.path
+            } else {
+                state.activeEditorTabPath
+            }
+            state.copy(
+                openEditorTabs = remaining,
+                activeEditorTabPath = newActive,
+                diskConflictPath = if (state.diskConflictPath == relativePath) null else state.diskConflictPath,
+                openedFilePath = newActive,
+                openedFileContent = remaining.find { it.path == newActive }?.content,
+            )
+        }
+    }
+
+    fun updateEditorTabContent(relativePath: String, newContent: String, isModified: Boolean) {
+        _state.update { state ->
+            val updated = state.openEditorTabs.map { tab ->
+                if (tab.path == relativePath) {
+                    tab.copy(content = newContent, isModified = isModified)
+                } else tab
+            }
+            state.copy(openEditorTabs = updated)
+        }
+    }
+
+    fun saveEditorTab(relativePath: String, contentToSave: String, onSaved: (() -> Unit)? = null) {
+        val project = _state.value.activeProject ?: return
+        val tab = _state.value.openEditorTabs.find { it.path == relativePath } ?: return
+        viewModelScope.launch {
+            val root = projectWorkspaceRoot(project)
+            val file = File(root, relativePath).canonicalFile
+            if (!file.toPath().startsWith(root.canonicalFile.toPath())) {
+                _state.update { it.copy(toastMessage = "Invalid file path") }
+                return@launch
+            }
+
+            val diskModTime = withContext(Dispatchers.IO) { file.lastModified() }
+            if (file.exists() && diskModTime > tab.diskModifiedTime) {
+                _state.update { state ->
+                    state.copy(
+                        diskConflictPath = relativePath,
+                        toastMessage = "File changed on disk! Choose Reload or Keep mine.",
+                    )
+                }
+                return@launch
+            }
+
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    file.parentFile?.mkdirs()
+                    file.writeText(contentToSave, Charsets.UTF_8)
+                    file.lastModified()
+                }
+            }
+
+            result.onSuccess { newModTime ->
+                _state.update { state ->
+                    val updated = state.openEditorTabs.map { t ->
+                        if (t.path == relativePath) {
+                            t.copy(
+                                content = contentToSave,
+                                diskModifiedTime = newModTime,
+                                isModified = false,
+                                totalSizeBytes = file.length(),
+                            )
+                        } else t
+                    }
+                    state.copy(
+                        openEditorTabs = updated,
+                        diskConflictPath = if (state.diskConflictPath == relativePath) null else state.diskConflictPath,
+                        toastMessage = "Saved ${file.name}",
+                    )
+                }
+                refreshProjectFiles()
+                onSaved?.invoke()
+            }.onFailure { err ->
+                _state.update { it.copy(toastMessage = "Failed to save: ${err.message}") }
+            }
+        }
+    }
+
+    fun saveAllEditorTabs(activePath: String? = null, activeContent: String? = null) {
+        val project = _state.value.activeProject ?: return
+        viewModelScope.launch {
+            val root = projectWorkspaceRoot(project)
+            var anySaved = 0
+            var hadConflict = false
+
+            val currentTabs = _state.value.openEditorTabs.map { tab ->
+                if (activePath != null && tab.path == activePath && activeContent != null) {
+                    tab.copy(content = activeContent, isModified = true)
+                } else tab
+            }
+
+            val updatedTabs = currentTabs.map { tab ->
+                if (!tab.isModified && tab.path != activePath) return@map tab
+                val file = File(root, tab.path).canonicalFile
+                if (!file.toPath().startsWith(root.canonicalFile.toPath())) return@map tab
+
+                val diskMod = withContext(Dispatchers.IO) { file.lastModified() }
+                if (file.exists() && diskMod > tab.diskModifiedTime) {
+                    hadConflict = true
+                    return@map tab
+                }
+
+                val saved = withContext(Dispatchers.IO) {
+                    runCatching {
+                        file.parentFile?.mkdirs()
+                        file.writeText(tab.content, Charsets.UTF_8)
+                        file.lastModified()
+                    }.getOrNull()
+                }
+
+                if (saved != null) {
+                    anySaved++
+                    tab.copy(diskModifiedTime = saved, isModified = false, totalSizeBytes = file.length())
+                } else {
+                    tab
+                }
+            }
+
+            _state.update { state ->
+                state.copy(
+                    openEditorTabs = updatedTabs,
+                    toastMessage = when {
+                        hadConflict -> "Some files were not saved because they changed on disk."
+                        anySaved > 0 -> "Saved $anySaved file${if (anySaved > 1) "s" else ""}"
+                        else -> "No unsaved changes"
+                    },
+                )
+            }
+            if (anySaved > 0) refreshProjectFiles()
+        }
+    }
+
+    fun reloadTabFromDisk(relativePath: String) {
+        val project = _state.value.activeProject ?: return
+        viewModelScope.launch {
+            val root = projectWorkspaceRoot(project)
+            val file = File(root, relativePath).canonicalFile
+            if (!file.isFile) {
+                _state.update { it.copy(toastMessage = "File does not exist on disk") }
+                return@launch
+            }
+            val loaded = withContext(Dispatchers.IO) {
+                val len = file.length()
+                val mod = file.lastModified()
+                if (len > MAX_EDITOR_INITIAL_BYTES) {
+                    val t = file.inputStream().use { stream ->
+                        val buf = ByteArray(MAX_EDITOR_INITIAL_BYTES.toInt())
+                        val read = stream.read(buf)
+                        String(buf, 0, read, Charsets.UTF_8)
+                    }
+                    LoadedEditorFile(t, isPartial = true, isBinary = false, totalSize = len, modTime = mod)
+                } else {
+                    LoadedEditorFile(file.readText(Charsets.UTF_8), isPartial = false, isBinary = false, totalSize = len, modTime = mod)
+                }
+            }
+            _state.update { state ->
+                val updated = state.openEditorTabs.map { tab ->
+                    if (tab.path == relativePath) {
+                        tab.copy(
+                            content = loaded.content,
+                            diskModifiedTime = loaded.modTime,
+                            isModified = false,
+                            isPartiallyLoaded = loaded.isPartial,
+                            totalSizeBytes = loaded.totalSize,
+                        )
+                    } else tab
+                }
+                state.copy(
+                    openEditorTabs = updated,
+                    diskConflictPath = if (state.diskConflictPath == relativePath) null else state.diskConflictPath,
+                    toastMessage = "Reloaded ${file.name} from disk",
+                )
+            }
+        }
+    }
+
+    fun keepTabContent(relativePath: String) {
+        val project = _state.value.activeProject ?: return
+        viewModelScope.launch {
+            val root = projectWorkspaceRoot(project)
+            val file = File(root, relativePath).canonicalFile
+            val modTime = withContext(Dispatchers.IO) { file.lastModified() }
+            _state.update { state ->
+                val updated = state.openEditorTabs.map { tab ->
+                    if (tab.path == relativePath) {
+                        tab.copy(diskModifiedTime = modTime, isModified = true)
+                    } else tab
+                }
+                state.copy(
+                    openEditorTabs = updated,
+                    diskConflictPath = if (state.diskConflictPath == relativePath) null else state.diskConflictPath,
+                )
+            }
+        }
+    }
+
+    fun checkDiskModificationsForEditor() {
+        val project = _state.value.activeProject ?: return
+        val tabs = _state.value.openEditorTabs
+        if (tabs.isEmpty()) return
+        viewModelScope.launch {
+            val root = projectWorkspaceRoot(project)
+            val activePath = _state.value.activeEditorTabPath
+            var conflictPath: String? = null
+            withContext(Dispatchers.IO) {
+                for (tab in tabs) {
+                    val file = File(root, tab.path)
+                    if (file.isFile && file.lastModified() > tab.diskModifiedTime) {
+                        if (tab.path == activePath) {
+                            conflictPath = tab.path
+                            break
+                        } else if (conflictPath == null) {
+                            conflictPath = tab.path
+                        }
+                    }
+                }
+            }
+            if (conflictPath != null) {
+                _state.update { it.copy(diskConflictPath = conflictPath) }
+            }
+        }
+    }
+
+    fun createWorkspaceFile(parentDirRelative: String, fileName: String) {
+        val trimmed = fileName.trim()
+        if (trimmed.isBlank()) {
+            _state.update { it.copy(toastMessage = "File name cannot be empty") }
+            return
+        }
+        val project = _state.value.activeProject ?: return
+        viewModelScope.launch {
+            val root = projectWorkspaceRoot(project)
+            val parent = if (parentDirRelative.isBlank()) root else File(root, parentDirRelative).canonicalFile
+            if (!parent.toPath().startsWith(root.canonicalFile.toPath())) {
+                _state.update { it.copy(toastMessage = "Invalid directory path") }
+                return@launch
+            }
+            val target = File(parent, trimmed).canonicalFile
+            if (!target.toPath().startsWith(root.canonicalFile.toPath())) {
+                _state.update { it.copy(toastMessage = "Invalid file name") }
+                return@launch
+            }
+            if (target.exists()) {
+                _state.update { it.copy(toastMessage = "File already exists: $trimmed") }
+                return@launch
+            }
+
+            val created = withContext(Dispatchers.IO) {
+                runCatching {
+                    parent.mkdirs()
+                    target.createNewFile()
+                }.isSuccess
+            }
+
+            if (created) {
+                val relPath = target.relativeTo(root).invariantSeparatorsPath
+                refreshProjectFiles()
+                openEditorFile(relPath)
+                _state.update { it.copy(toastMessage = "Created $trimmed") }
+            } else {
+                _state.update { it.copy(toastMessage = "Failed to create file: $trimmed") }
+            }
+        }
+    }
+
+    fun createWorkspaceFolder(parentDirRelative: String, folderName: String) {
+        val trimmed = folderName.trim()
+        if (trimmed.isBlank()) {
+            _state.update { it.copy(toastMessage = "Folder name cannot be empty") }
+            return
+        }
+        val project = _state.value.activeProject ?: return
+        viewModelScope.launch {
+            val root = projectWorkspaceRoot(project)
+            val parent = if (parentDirRelative.isBlank()) root else File(root, parentDirRelative).canonicalFile
+            if (!parent.toPath().startsWith(root.canonicalFile.toPath())) {
+                _state.update { it.copy(toastMessage = "Invalid directory path") }
+                return@launch
+            }
+            val target = File(parent, trimmed).canonicalFile
+            if (!target.toPath().startsWith(root.canonicalFile.toPath())) {
+                _state.update { it.copy(toastMessage = "Invalid folder name") }
+                return@launch
+            }
+            if (target.exists()) {
+                _state.update { it.copy(toastMessage = "Folder already exists: $trimmed") }
+                return@launch
+            }
+
+            val created = withContext(Dispatchers.IO) {
+                runCatching { target.mkdirs() }.isSuccess
+            }
+
+            if (created) {
+                refreshProjectFiles()
+                _state.update { it.copy(toastMessage = "Created folder $trimmed") }
+            } else {
+                _state.update { it.copy(toastMessage = "Failed to create folder: $trimmed") }
+            }
+        }
+    }
+
+    fun renameWorkspaceEntry(oldRelativePath: String, newName: String) {
+        val trimmed = newName.trim()
+        if (trimmed.isBlank()) {
+            _state.update { it.copy(toastMessage = "Name cannot be empty") }
+            return
+        }
+        val project = _state.value.activeProject ?: return
+        viewModelScope.launch {
+            val root = projectWorkspaceRoot(project)
+            val oldFile = File(root, oldRelativePath).canonicalFile
+            if (!oldFile.toPath().startsWith(root.canonicalFile.toPath())) {
+                _state.update { it.copy(toastMessage = "Invalid path") }
+                return@launch
+            }
+            val newFile = File(oldFile.parentFile, trimmed).canonicalFile
+            if (!newFile.toPath().startsWith(root.canonicalFile.toPath())) {
+                _state.update { it.copy(toastMessage = "Invalid new name") }
+                return@launch
+            }
+            if (newFile.exists()) {
+                _state.update { it.copy(toastMessage = "A file or folder named $trimmed already exists") }
+                return@launch
+            }
+
+            val success = withContext(Dispatchers.IO) {
+                oldFile.renameTo(newFile)
+            }
+
+            if (success) {
+                val newRelPath = newFile.relativeTo(root).invariantSeparatorsPath
+                _state.update { state ->
+                    val updatedTabs = state.openEditorTabs.map { tab ->
+                        if (tab.path == oldRelativePath) {
+                            tab.copy(path = newRelPath, name = newFile.name)
+                        } else if (tab.path.startsWith("$oldRelativePath/")) {
+                            val suffix = tab.path.removePrefix("$oldRelativePath/")
+                            tab.copy(path = "$newRelPath/$suffix")
+                        } else tab
+                    }
+                    val updatedActive = when {
+                        state.activeEditorTabPath == oldRelativePath -> newRelPath
+                        state.activeEditorTabPath?.startsWith("$oldRelativePath/") == true ->
+                            "$newRelPath/${state.activeEditorTabPath.removePrefix("$oldRelativePath/")}"
+                        else -> state.activeEditorTabPath
+                    }
+                    state.copy(openEditorTabs = updatedTabs, activeEditorTabPath = updatedActive)
+                }
+                refreshProjectFiles()
+                _state.update { it.copy(toastMessage = "Renamed to $trimmed") }
+            } else {
+                _state.update { it.copy(toastMessage = "Failed to rename $trimmed") }
+            }
+        }
+    }
+
+    fun deleteWorkspaceEntry(relativePath: String) {
+        val project = _state.value.activeProject ?: return
+        viewModelScope.launch {
+            val root = projectWorkspaceRoot(project)
+            val target = File(root, relativePath).canonicalFile
+            if (!target.toPath().startsWith(root.canonicalFile.toPath()) || target == root.canonicalFile) {
+                _state.update { it.copy(toastMessage = "Cannot delete root or outside project") }
+                return@launch
+            }
+
+            val deleted = withContext(Dispatchers.IO) {
+                target.deleteRecursively()
+            }
+
+            if (deleted) {
+                _state.update { state ->
+                    val remainingTabs = state.openEditorTabs.filterNot {
+                        it.path == relativePath || it.path.startsWith("$relativePath/")
+                    }
+                    val newActive = if (remainingTabs.none { it.path == state.activeEditorTabPath }) {
+                        remainingTabs.lastOrNull()?.path
+                    } else {
+                        state.activeEditorTabPath
+                    }
+                    state.copy(
+                        openEditorTabs = remainingTabs,
+                        activeEditorTabPath = newActive,
+                        diskConflictPath = if (state.diskConflictPath == relativePath || state.diskConflictPath?.startsWith("$relativePath/") == true) null else state.diskConflictPath,
+                        toastMessage = "Deleted ${target.name}",
+                    )
+                }
+                refreshProjectFiles()
+            } else {
+                _state.update { it.copy(toastMessage = "Failed to delete ${target.name}") }
+            }
+        }
     }
 
 
@@ -3467,6 +3996,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (event is RuntimeEvent.FilesChanged || event is RuntimeEvent.SessionCompleted) {
             _state.value.activeProject?.id?.let { touchProject(it) }
             refreshProjectFiles()
+            checkDiskModificationsForEditor()
         }
         // Save every visible reasoning/tool transition, not only assistant text and
         // final results. If Android kills the process, the last displayed timeline

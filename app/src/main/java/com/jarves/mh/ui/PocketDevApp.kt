@@ -358,6 +358,19 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onFallbackFromNimToOpenRouter = viewModel::fallbackFromNimToOpenRouter,
             onFallbackFromNimToCustom = viewModel::fallbackFromNimToCustomProvider,
             onDismissNimBanner = viewModel::dismissNimConcurrencyBanner,
+            onOpenEditorFile = viewModel::openEditorFile,
+            onSelectEditorTab = viewModel::selectEditorTab,
+            onCloseEditorTab = viewModel::closeEditorTab,
+            onUpdateEditorTabContent = viewModel::updateEditorTabContent,
+            onSaveEditorTab = viewModel::saveEditorTab,
+            onSaveAllEditorTabs = viewModel::saveAllEditorTabs,
+            onReloadTabFromDisk = viewModel::reloadTabFromDisk,
+            onKeepEditorTabContent = viewModel::keepTabContent,
+            onLoadFullEditorFile = viewModel::loadFullEditorFile,
+            onCreateWorkspaceFile = viewModel::createWorkspaceFile,
+            onCreateWorkspaceFolder = viewModel::createWorkspaceFolder,
+            onRenameWorkspaceEntry = viewModel::renameWorkspaceEntry,
+            onDeleteWorkspaceEntry = viewModel::deleteWorkspaceEntry,
         )
         else -> RootScreenHost(state, viewModel, projectsListState)
     }
@@ -3850,6 +3863,19 @@ private fun WorkspaceScreen(
     onFallbackFromNimToOpenRouter: () -> Unit = {},
     onFallbackFromNimToCustom: () -> Unit = {},
     onDismissNimBanner: () -> Unit = {},
+    onOpenEditorFile: (String) -> Unit = {},
+    onSelectEditorTab: (String) -> Unit = {},
+    onCloseEditorTab: (String) -> Unit = {},
+    onUpdateEditorTabContent: (String, String, Boolean) -> Unit = { _, _, _ -> },
+    onSaveEditorTab: (String, String) -> Unit = { _, _ -> },
+    onSaveAllEditorTabs: (String?, String?) -> Unit = { _, _ -> },
+    onReloadTabFromDisk: (String) -> Unit = {},
+    onKeepEditorTabContent: (String) -> Unit = {},
+    onLoadFullEditorFile: (String) -> Unit = {},
+    onCreateWorkspaceFile: (String, String) -> Unit = { _, _ -> },
+    onCreateWorkspaceFolder: (String, String) -> Unit = { _, _ -> },
+    onRenameWorkspaceEntry: (String, String) -> Unit = { _, _ -> },
+    onDeleteWorkspaceEntry: (String) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -3917,22 +3943,10 @@ private fun WorkspaceScreen(
     var showChats by rememberSaveable { mutableStateOf(false) }
     val activeChat = state.projectChats.firstOrNull { it.id == state.activeChatId }
 
-    // If a file is open, show the FileViewerScreen on top
-    if (state.openedFilePath != null) {
-        BackHandler(onBack = {
-            onCloseFile()
+    LaunchedEffect(state.activeEditorTabPath) {
+        if (state.activeEditorTabPath != null && selectedTab != WorkspaceTab.FILES) {
             selectedTab = WorkspaceTab.FILES
-        })
-        FileViewerScreen(
-            filePath = state.openedFilePath,
-            content = state.openedFileContent,
-            loading = state.fileContentLoading,
-            onClose = {
-                onCloseFile()
-                selectedTab = WorkspaceTab.FILES
-            },
-        )
-        return
+        }
     }
 
     if (showChats) {
@@ -4086,16 +4100,26 @@ private fun WorkspaceScreen(
                             onTerminalPrepare(command)
                         },
                     )
-                    WorkspaceTab.FILES -> FilesTab(
+                    WorkspaceTab.FILES -> EditorScreen(
                         files = state.workspaceFiles,
-                        loading = state.filesLoading,
-                        suggestedProjectRoot = state.suggestedProjectRoot,
-                        onRefresh = onRefreshFiles,
-                        onOpenFile = onOpenFile,
-                        onUseSuggestedProjectRoot = onUseSuggestedProjectRoot,
-                        onExport = {
-                            exportProjectLauncher.launch("${state.activeProject?.slug ?: "project"}.zip")
-                        },
+                        openTabs = state.openEditorTabs,
+                        activeTabPath = state.activeEditorTabPath,
+                        diskConflictPath = state.diskConflictPath,
+                        onOpenFile = onOpenEditorFile,
+                        onSelectTab = onSelectEditorTab,
+                        onCloseTab = onCloseEditorTab,
+                        onUpdateTabContent = onUpdateEditorTabContent,
+                        onSaveTab = onSaveEditorTab,
+                        onSaveAll = onSaveAllEditorTabs,
+                        onReloadFromDisk = onReloadTabFromDisk,
+                        onKeepEditorChanges = onKeepEditorTabContent,
+                        onLoadFullFile = onLoadFullEditorFile,
+                        onCreateFile = onCreateWorkspaceFile,
+                        onCreateFolder = onCreateWorkspaceFolder,
+                        onRenameEntry = onRenameWorkspaceEntry,
+                        onDeleteEntry = onDeleteWorkspaceEntry,
+                        onRefreshFiles = onRefreshFiles,
+                        onBackToChat = { selectedTab = WorkspaceTab.CHAT },
                     )
                     WorkspaceTab.TERMINAL -> TerminalScreen(
                         lines = state.projectTerminalLines,

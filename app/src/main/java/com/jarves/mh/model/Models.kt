@@ -247,6 +247,16 @@ data class WorkspaceEntry(
     val sizeBytes: Long = 0,
 )
 
+data class EditorTab(
+    val path: String,
+    val name: String,
+    val content: String,
+    val diskModifiedTime: Long,
+    val isModified: Boolean = false,
+    val isPartiallyLoaded: Boolean = false,
+    val totalSizeBytes: Long = 0L,
+)
+
 enum class RiskLevel { SAFE, REVIEW, HIGH }
 
 /**

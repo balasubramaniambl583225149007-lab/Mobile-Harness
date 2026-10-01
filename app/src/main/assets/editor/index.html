@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes">
+  <title>Mobile Harness Editor</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #1e1e1e;
+      color: #d4d4d4;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      touch-action: pan-x pan-y;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    #editor {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      -webkit-user-select: text;
+      user-select: text;
+    }
+    .cm-editor {
+      height: 100% !important;
+    }
+    .cm-scroller {
+      height: 100% !important;
+    }
+  </style>
+</head>
+<body>
+  <div id="editor"></div>
+  <script src="editor.bundle.js"></script>
+  <script>
+    window.requestSave = function() {
+      if (window.editorBridge && window.AndroidBridge && window.AndroidBridge.onSave) {
+        var content = window.editorBridge.getContent();
+        window.AndroidBridge.onSave(content);
+      }
+    };
+
+    window.syncContentToAndroid = function() {
+      if (window.editorBridge && window.AndroidBridge && window.AndroidBridge.onSyncContent) {
+        var content = window.editorBridge.getContent();
+        var modified = window.editorBridge.isModified();
+        window.AndroidBridge.onSyncContent(content, modified);
+      }
+    };
+
+    window.loadTabFromAndroid = function() {
+      if (window.editorBridge && window.AndroidBridge && window.AndroidBridge.getActiveTabContent) {
+        var content = window.AndroidBridge.getActiveTabContent();
+        var filename = window.AndroidBridge.getActiveTabName();
+        window.editorBridge.loadFile(content, filename);
+      }
+    };
+  </script>
+</body>
+</html>
