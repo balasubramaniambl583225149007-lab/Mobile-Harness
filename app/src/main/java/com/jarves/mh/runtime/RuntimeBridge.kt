@@ -54,11 +54,13 @@ object RuntimeLaunchConfigBuilder {
                 environment["ANTHROPIC_AUTH_TOKEN"] = ""
             }
             com.jarves.mh.model.ProviderProtocol.ANTHROPIC -> {
-                environment["ANTHROPIC_BASE_URL"] = profile.baseUrl.trimEnd('/')
+                environment["ANTHROPIC_BASE_URL"] = com.jarves.mh.model.normalizeBaseUrl(profile.baseUrl)
                 environment["ANTHROPIC_MODEL"] = profile.model
             }
             com.jarves.mh.model.ProviderProtocol.ANTHROPIC_GATEWAY -> {
-                environment["ANTHROPIC_BASE_URL"] = profile.baseUrl.trimEnd('/')
+                val cleanUrl = com.jarves.mh.model.normalizeBaseUrl(profile.baseUrl)
+                val target = if (cleanUrl.endsWith("/v1")) cleanUrl.removeSuffix("/v1") else cleanUrl
+                environment["ANTHROPIC_BASE_URL"] = target
                 environment["ANTHROPIC_MODEL"] = profile.model
             }
             com.jarves.mh.model.ProviderProtocol.OPENROUTER -> {
@@ -101,6 +103,14 @@ object RuntimeLaunchConfigBuilder {
             } else if (!authToken.isNullOrBlank()) {
                 environment["ANTHROPIC_AUTH_TOKEN"] = authToken
                 environment["ANTHROPIC_API_KEY"] = authToken
+            }
+            if (profile.kind == com.jarves.mh.model.ProviderKind.CUSTOM) {
+                val cleanUrl = com.jarves.mh.model.normalizeBaseUrl(profile.baseUrl)
+                val openAiBase = if (cleanUrl.endsWith("/v1")) cleanUrl else "$cleanUrl/v1"
+                environment["OPENAI_API_BASE"] = openAiBase
+                if (!authToken.isNullOrBlank()) {
+                    environment["OPENAI_API_KEY"] = authToken
+                }
             }
         }
         return RuntimeLaunchConfig(

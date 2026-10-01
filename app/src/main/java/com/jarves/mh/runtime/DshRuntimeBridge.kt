@@ -118,6 +118,12 @@ class DshRuntimeBridge(
             if (provider.kind == ProviderKind.LLM_ROUTER) {
                 environment["OPENROUTER_API_KEY"] = secret
             }
+            if (provider.kind == ProviderKind.CUSTOM) {
+                val cleanUrl = com.jarves.mh.model.normalizeBaseUrl(provider.resolvedBaseUrl)
+                val openAiBase = if (cleanUrl.endsWith("/v1")) cleanUrl else "$cleanUrl/v1"
+                environment["OPENAI_API_BASE"] = openAiBase
+                environment["OPENAI_API_KEY"] = secret
+            }
             if (route.keyEnv != FALLBACK_KEY_ENV) environment.remove(FALLBACK_KEY_ENV)
 
             val guestWorkspacePath = "/workspace/$projectSlug"
@@ -713,12 +719,20 @@ internal object DshRouteMapper {
                 defaultModel = model,
                 custom = DshCustomRoute("openai-completions", profile.resolvedBaseUrl),
             )
-            ProviderKind.CUSTOM -> DshRoute(
-                name = "mh-custom",
-                keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
-                defaultModel = model,
-                custom = DshCustomRoute(profile.dshApi.ifBlank { "anthropic-messages" }, profile.resolvedBaseUrl),
-            )
+            ProviderKind.CUSTOM -> {
+                val cleanUrl = com.jarves.mh.model.normalizeBaseUrl(profile.resolvedBaseUrl)
+                val targetUrl = when (profile.dshApi) {
+                    "openai-completions", "openai-responses" -> if (cleanUrl.endsWith("/v1")) cleanUrl else "$cleanUrl/v1"
+                    "anthropic-messages" -> cleanUrl.removeSuffix("/v1")
+                    else -> cleanUrl
+                }
+                DshRoute(
+                    name = "mh-custom",
+                    keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
+                    defaultModel = model,
+                    custom = DshCustomRoute(profile.dshApi.ifBlank { "anthropic-messages" }, targetUrl),
+                )
+            }
             ProviderKind.CLAUDE -> throw IllegalArgumentException("Claude subscription login is not supported by DeepSeek Harness")
         }
     }

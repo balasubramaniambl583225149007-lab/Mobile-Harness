@@ -109,8 +109,19 @@ fun defaultDshApiForProvider(kind: ProviderKind): String = when (kind) {
  * Best-effort protocol choice for a user-entered custom gateway URL.
  * The picker remains editable because a URL alone cannot prove a gateway's wire format.
  */
+fun normalizeBaseUrl(url: String): String {
+    val trimmed = url.trim()
+    if (trimmed.isBlank()) return ""
+    val withScheme = if (!trimmed.startsWith("http://", ignoreCase = true) && !trimmed.startsWith("https://", ignoreCase = true)) {
+        "https://$trimmed"
+    } else {
+        trimmed
+    }
+    return withScheme.trimEnd('/')
+}
+
 fun inferredDshApiForUrl(baseUrl: String): String {
-    val normalized = baseUrl.trim().trimEnd('/').lowercase(Locale.ROOT)
+    val normalized = normalizeBaseUrl(baseUrl).lowercase(Locale.ROOT)
     return when {
         normalized.endsWith("/responses") -> "openai-responses"
         "/anthropic" in normalized || "api.anthropic.com" in normalized -> "anthropic-messages"
@@ -152,7 +163,7 @@ data class ProviderProfile(
     val openRouterAllowFallbacks: Boolean = true,
 ) {
     /** Effective base URL: fixed kinds always resolve to their constant, ignoring stored drift. */
-    val resolvedBaseUrl: String get() = if (kind.fixedBaseUrl) kind.defaultBaseUrl else baseUrl
+    val resolvedBaseUrl: String get() = if (kind.fixedBaseUrl) kind.defaultBaseUrl else normalizeBaseUrl(baseUrl)
 
     val openRouterProviders: List<String>
         get() = openRouterProviderOrder.split(',')
