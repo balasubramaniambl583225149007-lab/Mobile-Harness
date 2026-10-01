@@ -98,7 +98,9 @@ import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
 import com.jarves.mh.model.defaultDshApiForProvider
 import com.jarves.mh.model.inferredDshApiForUrl
+import com.jarves.mh.model.normalizeProviderBaseUrl
 import com.jarves.mh.model.providersForAgent
+import com.jarves.mh.model.sanitizeBaseUrlInput
 import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.DiscoveredModel
 import com.jarves.mh.network.ModelDiscoveryResult
@@ -195,6 +197,9 @@ fun AgentScreen(
     var newKeyVisible by rememberSaveable(selectedKind, savedKeys.isEmpty()) { mutableStateOf(savedKeys.isEmpty()) }
     var models by remember(selectedKind, baseUrl) { mutableStateOf(emptyList<DiscoveredModel>()) }
     var modelSearch by rememberSaveable(selectedKind) { mutableStateOf("") }
+    var freeModelsOnly by rememberSaveable(state.agentKind, selectedKind) {
+        mutableStateOf(state.agentKind == AgentKind.OPENCODE && selectedKind == ProviderKind.LLM_ROUTER)
+    }
     var showModels by rememberSaveable { mutableStateOf(false) }
     var isDiscovering by remember { mutableStateOf(false) }
     var isValidating by remember { mutableStateOf(false) }
@@ -219,9 +224,22 @@ fun AgentScreen(
     val providerSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val antigravitySheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    val filteredModels = remember(models, modelSearch) {
+    fun editorBaseUrl(kind: ProviderKind): String = when {
+        kind == ProviderKind.CLAUDE -> ""
+        kind.fixedBaseUrl -> kind.defaultBaseUrl
+        else -> normalizeProviderBaseUrl(
+            baseUrl,
+            openAiCompatible = kind == ProviderKind.CUSTOM &&
+                dshApi.startsWith("openai-"),
+        )
+    }
+
+    val filteredModels = remember(models, modelSearch, freeModelsOnly, state.agentKind, selectedKind) {
         val q = modelSearch.trim()
-        if (q.isBlank()) models else models.filter {
+        val agentFiltered = if (state.agentKind == AgentKind.OPENCODE && selectedKind == ProviderKind.LLM_ROUTER && freeModelsOnly) {
+            models.filter { it.isFree || it.id.endsWith(":free", ignoreCase = true) }
+        } else models
+        if (q.isBlank()) agentFiltered else agentFiltered.filter {
             it.id.contains(q, true) || it.displayName.contains(q, true)
         }
     }
@@ -268,7 +286,12 @@ fun AgentScreen(
             statusOk = true
             statusProviderMessage = null
             val kind = selectedKind
-            val url = if (kind.fixedBaseUrl) kind.defaultBaseUrl else baseUrl.trim()
+            val url = runCatching { editorBaseUrl(kind) }.getOrElse { error ->
+                status = error.message ?: "Enter a valid base URL."
+                statusOk = false
+                isDiscovering = false
+                return@launch
+            }
             val profile = ProviderProfile(
                 kind,
                 url,
@@ -476,6 +499,15 @@ fun AgentScreen(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(14.dp),
                 )
+                if (state.agentKind == AgentKind.OPENCODE && selectedKind == ProviderKind.LLM_ROUTER) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Free models only", Modifier.weight(1f), fontSize = 13.sp)
+                        Switch(checked = freeModelsOnly, onCheckedChange = { freeModelsOnly = it })
+                    }
+                }
                 Spacer(Modifier.height(12.dp))
 
                 if (status != null) {
@@ -826,6 +858,7 @@ fun AgentScreen(
                                     AgentKind.ANTIGRAVITY -> "Antigravity"
                                     AgentKind.DEEPSEEK_HARNESS -> "DeepSeek"
                                     AgentKind.CLAUDE_CODE -> "Claude Code"
+                                    AgentKind.OPENCODE -> "OpenCode"
                                 }
                                 Surface(
                                     shape = RoundedCornerShape(12.dp),
@@ -1004,9 +1037,10 @@ fun AgentScreen(
                             statusProviderMessage = null
                         },
                         onBaseUrl = {
-                            baseUrl = it
-                            if (state.agentKind == AgentKind.DEEPSEEK_HARNESS && selectedKind == ProviderKind.CUSTOM) {
-                                dshApi = inferredDshApiForUrl(it)
+                            val sanitized = sanitizeBaseUrlInput(it)
+                            baseUrl = sanitized
+                            if (selectedKind == ProviderKind.CUSTOM) {
+                                dshApi = inferredDshApiForUrl(sanitized)
                             }
                             models = emptyList()
                             status = null
@@ -1068,7 +1102,12 @@ fun AgentScreen(
                                     statusOk = true
                                 }
                                 val kind = selectedKind
-                                val url = if (kind.fixedBaseUrl) kind.defaultBaseUrl else baseUrl.trim()
+                                val url = runCatching { editorBaseUrl(kind) }.getOrElse { error ->
+                                    status = error.message ?: "Enter a valid base URL."
+                                    statusOk = false
+                                    isValidating = false
+                                    return@launch
+                                }
                                 val profile = ProviderProfile(
                                     kind,
                                     url,
@@ -1585,7 +1624,7 @@ private fun AgentProviderCard(
                     title = if (selectedKind == ProviderKind.CUSTOM) "Custom API settings" else "Endpoint & protocol",
                     subtitle = buildString {
                         append(baseUrl.ifBlank { "Base URL required" })
-                        if (state.agentKind == AgentKind.DEEPSEEK_HARNESS && selectedKind in DSH_PROTOCOL_PROVIDERS) {
+                        if ((state.agentKind in setOf(AgentKind.DEEPSEEK_HARNESS, AgentKind.OPENCODE, AgentKind.CLAUDE_CODE)) && selectedKind in DSH_PROTOCOL_PROVIDERS) {
                             append(" · ")
                             append(if (selectedKind.fixedProtocol) defaultDshApiForProvider(selectedKind) else dshApi)
                         }
@@ -1649,7 +1688,7 @@ private fun AgentProviderCard(
                                 )
                             }
                         }
-                        if (state.agentKind == AgentKind.DEEPSEEK_HARNESS && selectedKind in DSH_PROTOCOL_PROVIDERS && !selectedKind.fixedProtocol) {
+                        if (state.agentKind in setOf(AgentKind.DEEPSEEK_HARNESS, AgentKind.OPENCODE, AgentKind.CLAUDE_CODE) && selectedKind in DSH_PROTOCOL_PROVIDERS && !selectedKind.fixedProtocol) {
                             Column(modifier = Modifier.fillMaxWidth()) {
                                 Text("Gateway protocol", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Spacer(Modifier.height(5.dp))

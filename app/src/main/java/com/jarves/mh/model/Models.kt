@@ -2,6 +2,7 @@ package com.jarves.mh.model
 
 import java.time.Instant
 import java.text.Normalizer
+import java.net.URI
 import java.util.Locale
 import java.util.UUID
 import kotlin.random.Random
@@ -72,6 +73,12 @@ enum class AgentKind(
         "Google's official coding agent · Google account",
         "39.9 MB",
     ),
+    OPENCODE(
+        "opencode",
+        "OpenCode",
+        "Open-source coding agent · API-key providers",
+        "npm package",
+    ),
     ;
 
     companion object {
@@ -105,6 +112,44 @@ fun defaultDshApiForProvider(kind: ProviderKind): String = when (kind) {
     else -> "anthropic-messages"
 }
 
+fun openRouterBaseUrl(baseUrl: String): String {
+    val normalized = normalizeProviderBaseUrl(baseUrl).trimEnd('/')
+    return if (normalized.endsWith("/v1", ignoreCase = true)) normalized else "$normalized/v1"
+}
+
+fun sanitizeBaseUrlInput(value: String): String = value.trim().replace(Regex("[\\s<>\"{}|\\\\^`]"), "")
+
+fun normalizeProviderBaseUrl(baseUrl: String, openAiCompatible: Boolean = false): String {
+    val sanitized = sanitizeBaseUrlInput(baseUrl)
+    require(sanitized.isNotBlank()) { "Enter a base URL first." }
+    val schemePattern = Regex("^[A-Za-z][A-Za-z0-9+.-]*://")
+    val candidate = if (schemePattern.containsMatchIn(sanitized)) sanitized else "https://$sanitized"
+    val parsed = URI(candidate)
+    val scheme = parsed.scheme?.lowercase(Locale.ROOT)
+    require(scheme == "http" || scheme == "https") { "Base URL must use http:// or https://." }
+    require(parsed.host != null && parsed.rawUserInfo == null && parsed.rawQuery == null && parsed.rawFragment == null) {
+        "Enter a valid base URL without credentials, query, or fragment."
+    }
+    val path = parsed.rawPath.orEmpty().trimEnd('/')
+    val normalizedPath = when {
+        openAiCompatible && !path.endsWith("/v1", ignoreCase = true) -> "$path/v1"
+        else -> path
+    }
+    return URI(scheme, null, parsed.host, parsed.port, normalizedPath.ifBlank { "" }, null, null)
+        .toASCIIString()
+        .trimEnd('/')
+}
+
+fun openRouterModelSlug(model: String): String {
+    val normalized = model.trim().removePrefix("~")
+    return when (normalized.lowercase(Locale.ROOT)) {
+        "deepseek-chat" -> "deepseek/deepseek-chat"
+        "deepseek-r1" -> "deepseek/deepseek-r1"
+        "deepseek-r1:free" -> "deepseek/deepseek-r1:free"
+        else -> normalized
+    }
+}
+
 /**
  * Best-effort protocol choice for a user-entered custom gateway URL.
  * The picker remains editable because a URL alone cannot prove a gateway's wire format.
@@ -121,7 +166,10 @@ fun inferredDshApiForUrl(baseUrl: String): String {
 
 /** Resolves the protocol DeepSeek Harness will actually use for this saved profile. */
 fun providerProtocolForAgent(profile: ProviderProfile, agent: AgentKind): ProviderProtocol {
-    if (agent != AgentKind.DEEPSEEK_HARNESS || profile.kind !in DSH_PROTOCOL_PROVIDERS) {
+    if (profile.kind == ProviderKind.CUSTOM && profile.dshApi.startsWith("openai-")) {
+        return if (profile.dshApi == "openai-responses") ProviderProtocol.OPENAI_RESPONSES else ProviderProtocol.OPENAI_CHAT
+    }
+    if (agent !in setOf(AgentKind.DEEPSEEK_HARNESS, AgentKind.OPENCODE) || profile.kind !in DSH_PROTOCOL_PROVIDERS) {
         return profile.kind.protocol
     }
     val api = if (profile.kind.fixedProtocol) defaultDshApiForProvider(profile.kind) else profile.dshApi
@@ -135,8 +183,9 @@ fun providerProtocolForAgent(profile: ProviderProfile, agent: AgentKind): Provid
 /** Provider choices shown for the selected coding agent. */
 fun providersForAgent(agent: AgentKind): List<ProviderKind> = when (agent) {
     AgentKind.DEEPSEEK_HARNESS -> ProviderKind.entries.filter { it in DEEPSEEK_HARNESS_PROVIDERS }
-    AgentKind.CLAUDE_CODE -> ProviderKind.entries.filterNot { it == ProviderKind.OPENCODE_ZEN }
+    AgentKind.CLAUDE_CODE -> ProviderKind.entries
     AgentKind.ANTIGRAVITY -> emptyList()
+    AgentKind.OPENCODE -> ProviderKind.entries.filterNot { it == ProviderKind.CLAUDE }
 }
 
 data class ProviderProfile(

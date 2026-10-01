@@ -44,7 +44,7 @@ internal fun List<ChatMessage>.recentWithinCharacterBudget(maxCharacters: Int): 
 object RuntimeLaunchConfigBuilder {
     fun build(profile: ProviderProfile, authToken: String? = null, localGatewayUrl: String? = null): RuntimeLaunchConfig {
         val environment = linkedMapOf("DISABLE_AUTOUPDATER" to "1")
-        when (profile.kind.protocol) {
+        when (com.jarves.mh.model.providerProtocolForAgent(profile, com.jarves.mh.model.AgentKind.CLAUDE_CODE)) {
             com.jarves.mh.model.ProviderProtocol.CLAUDE_LOGIN -> {
                 require(!authToken.isNullOrBlank()) { "Enter a Claude subscription token first" }
                 environment["CLAUDE_CODE_OAUTH_TOKEN"] = authToken
@@ -63,7 +63,7 @@ object RuntimeLaunchConfigBuilder {
             }
             com.jarves.mh.model.ProviderProtocol.OPENROUTER -> {
                 environment["ANTHROPIC_BASE_URL"] = (localGatewayUrl ?: profile.resolvedBaseUrl).trimEnd('/')
-                environment["ANTHROPIC_MODEL"] = profile.model
+                environment["ANTHROPIC_MODEL"] = com.jarves.mh.model.openRouterModelSlug(profile.model)
             }
             com.jarves.mh.model.ProviderProtocol.OPENAI_RESPONSES,
             com.jarves.mh.model.ProviderProtocol.OPENAI_CHAT,
@@ -91,6 +91,13 @@ object RuntimeLaunchConfigBuilder {
                     environment["OPENROUTER_API_KEY"] = authToken
                 } else {
                     environment["ANTHROPIC_API_KEY"] = authToken
+                }
+                if (profile.kind == com.jarves.mh.model.ProviderKind.CUSTOM && profile.dshApi.startsWith("openai-")) {
+                    environment["OPENAI_API_KEY"] = authToken
+                    environment["OPENAI_API_BASE"] = com.jarves.mh.model.normalizeProviderBaseUrl(
+                        profile.resolvedBaseUrl,
+                        openAiCompatible = true,
+                    )
                 }
             }
         }

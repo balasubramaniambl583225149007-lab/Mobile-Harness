@@ -1,6 +1,8 @@
 package com.jarves.mh.runtime
 
 import com.jarves.mh.model.ProviderProfile
+import com.jarves.mh.model.ProviderKind
+import com.jarves.mh.model.normalizeProviderBaseUrl
 import android.util.Log
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -66,12 +68,18 @@ internal class LocalFormatGateway(
         }
         runCatching {
             val anthropic = JSONObject(bodyBytes.decodeToString())
-            val upstream = callProvider(toOpenAi(anthropic))
+            val useResponsesApi = profile.kind == ProviderKind.OPENCODE_ZEN || profile.dshApi == "openai-responses"
+            val upstreamBody = if (useResponsesApi) toOpenAiResponses(anthropic) else toOpenAi(anthropic)
+            val upstream = callProvider(upstreamBody, useResponsesApi)
             if (upstream.first !in 200..299) {
                 Log.w("FormatGateway", "Provider returned HTTP ${upstream.first}: ${providerError(upstream.second)}")
                 writeJson(output, upstream.first, errorJson("api_error", providerError(upstream.second)))
             } else {
-                val translated = fromOpenAi(JSONObject(upstream.second), anthropic.optString("model", profile.model))
+                val translated = if (useResponsesApi) {
+                    fromOpenAiResponses(JSONObject(upstream.second), anthropic.optString("model", profile.model))
+                } else {
+                    fromOpenAi(JSONObject(upstream.second), anthropic.optString("model", profile.model))
+                }
                 if (anthropic.optBoolean("stream", false)) writeStream(output, translated) else writeJson(output, 200, translated.toString())
             }
         }.onFailure { error ->
@@ -141,6 +149,61 @@ internal class LocalFormatGateway(
         return target
     }
 
+    private fun toOpenAiResponses(source: JSONObject): JSONObject {
+        val input = JSONArray()
+        source.opt("system")?.let { system ->
+            val text = if (system is JSONArray) contentText(system) else system.toString()
+            if (text.isNotBlank()) input.put(JSONObject().put("role", "system").put("content", text))
+        }
+        val messages = source.optJSONArray("messages") ?: JSONArray()
+        for (index in 0 until messages.length()) {
+            val message = messages.getJSONObject(index)
+            val role = message.optString("role")
+            val parts = message.optJSONArray("content")
+            if (parts == null) {
+                input.put(JSONObject().put("role", role).put("content", message.opt("content") ?: ""))
+                continue
+            }
+            val text = contentText(parts)
+            if (text.isNotBlank()) input.put(JSONObject().put("role", role).put("content", text))
+            for (partIndex in 0 until parts.length()) {
+                val part = parts.optJSONObject(partIndex) ?: continue
+                when (part.optString("type")) {
+                    "tool_use" -> input.put(
+                        JSONObject().put("type", "function_call")
+                            .put("call_id", part.optString("id"))
+                            .put("name", part.optString("name"))
+                            .put("arguments", part.optJSONObject("input")?.toString() ?: "{}"),
+                    )
+                    "tool_result" -> input.put(
+                        JSONObject().put("type", "function_call_output")
+                            .put("call_id", part.optString("tool_use_id"))
+                            .put("output", valueText(part.opt("content"))),
+                    )
+                }
+            }
+        }
+        val target = JSONObject()
+            .put("model", normalizeModel(profile.model))
+            .put("input", input)
+            .put("max_output_tokens", source.optInt("max_tokens", 4096))
+            .put("stream", false)
+        source.optJSONArray("tools")?.let { tools ->
+            val converted = JSONArray()
+            for (index in 0 until tools.length()) {
+                val tool = tools.getJSONObject(index)
+                converted.put(
+                    JSONObject().put("type", "function")
+                        .put("name", tool.optString("name"))
+                        .put("description", tool.optString("description"))
+                        .put("parameters", tool.optJSONObject("input_schema") ?: JSONObject().put("type", "object")),
+                )
+            }
+            target.put("tools", converted)
+        }
+        return target
+    }
+
     private fun fromOpenAi(source: JSONObject, model: String): JSONObject {
         val message = source.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message") ?: JSONObject()
         val content = JSONArray()
@@ -164,8 +227,50 @@ internal class LocalFormatGateway(
             .put("usage", JSONObject().put("input_tokens", usage.optInt("prompt_tokens")).put("output_tokens", usage.optInt("completion_tokens")))
     }
 
-    private fun callProvider(body: JSONObject): Pair<Int, String> {
-        val endpoint = profile.baseUrl.trimEnd('/') + "/chat/completions"
+    private fun fromOpenAiResponses(source: JSONObject, model: String): JSONObject {
+        val content = JSONArray()
+        val output = source.optJSONArray("output") ?: JSONArray()
+        var hasToolCalls = false
+        for (index in 0 until output.length()) {
+            val item = output.optJSONObject(index) ?: continue
+            when (item.optString("type")) {
+                "message" -> {
+                    val parts = item.optJSONArray("content") ?: JSONArray()
+                    for (partIndex in 0 until parts.length()) {
+                        val part = parts.optJSONObject(partIndex) ?: continue
+                        if (part.optString("type") in setOf("output_text", "text")) {
+                            val text = part.optString("text")
+                            if (text.isNotBlank()) content.put(JSONObject().put("type", "text").put("text", text))
+                        }
+                    }
+                }
+                "function_call" -> {
+                    hasToolCalls = true
+                    val arguments = runCatching { JSONObject(item.optString("arguments", "{}")) }.getOrDefault(JSONObject())
+                    content.put(
+                        JSONObject().put("type", "tool_use")
+                            .put("id", item.optString("call_id").ifBlank { "tool_${UUID.randomUUID()}" })
+                            .put("name", item.optString("name"))
+                            .put("input", arguments),
+                    )
+                }
+            }
+        }
+        val usage = source.optJSONObject("usage") ?: JSONObject()
+        return JSONObject().put("id", source.optString("id").ifBlank { "msg_${UUID.randomUUID()}" })
+            .put("type", "message").put("role", "assistant").put("model", model)
+            .put("content", content).put("stop_reason", if (hasToolCalls) "tool_use" else "end_turn")
+            .put("stop_sequence", JSONObject.NULL)
+            .put("usage", JSONObject().put("input_tokens", usage.optInt("input_tokens")).put("output_tokens", usage.optInt("output_tokens")))
+    }
+
+    private fun callProvider(body: JSONObject, useResponsesApi: Boolean): Pair<Int, String> {
+        val baseUrl = if (profile.kind == ProviderKind.CUSTOM && profile.dshApi.startsWith("openai-")) {
+            normalizeProviderBaseUrl(profile.resolvedBaseUrl, openAiCompatible = true)
+        } else {
+            profile.resolvedBaseUrl.trimEnd('/')
+        }
+        val endpoint = baseUrl + if (useResponsesApi) "/responses" else "/chat/completions"
         val connection = URL(endpoint).openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "POST"
@@ -174,6 +279,9 @@ internal class LocalFormatGateway(
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json")
             connection.setRequestProperty("Authorization", "Bearer $apiKey")
+            if (connection.url.host.equals("opencode.ai", ignoreCase = true)) {
+                OpenCodeZenClient.applyHeaders(connection)
+            }
             connection.outputStream.use { it.write(body.toString().toByteArray()) }
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream

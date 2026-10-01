@@ -52,6 +52,7 @@ class RuntimeLaunchConfigBuilderTest {
         )
 
         assertEquals("https://openrouter.ai/api", config.environment["ANTHROPIC_BASE_URL"])
+        assertEquals("stealth/ox-alpha", config.environment["ANTHROPIC_MODEL"])
         assertEquals("temporary-openrouter-secret", config.environment["ANTHROPIC_AUTH_TOKEN"])
         assertEquals("temporary-openrouter-secret", config.environment["OPENROUTER_API_KEY"])
         assertEquals("", config.environment["ANTHROPIC_API_KEY"])
@@ -66,6 +67,16 @@ class RuntimeLaunchConfigBuilderTest {
         )
 
         assertEquals("http://127.0.0.1:23456", config.environment["ANTHROPIC_BASE_URL"])
+    }
+
+    @Test
+    fun openRouterDeepSeekFreeModelUsesProviderSlug() {
+        val config = RuntimeLaunchConfigBuilder.build(
+            ProviderProfile(ProviderKind.LLM_ROUTER, model = "deepseek-r1:free"),
+            authToken = "temporary-openrouter-secret",
+        )
+
+        assertEquals("deepseek/deepseek-r1:free", config.environment["ANTHROPIC_MODEL"])
     }
 
     @Test
@@ -97,5 +108,22 @@ class RuntimeLaunchConfigBuilderTest {
 
         assertEquals("http://127.0.0.1:12345", config.environment["ANTHROPIC_BASE_URL"])
         assertEquals("claude-sonnet-4-6", config.environment["ANTHROPIC_MODEL"])
+    }
+
+    @Test
+    fun customOpenAiGatewayExportsStandardEnvironment() {
+        val config = RuntimeLaunchConfigBuilder.build(
+            ProviderProfile(
+                ProviderKind.CUSTOM,
+                "gateway.example",
+                "custom-model",
+                dshApi = "openai-responses",
+            ),
+            authToken = "temporary-secret",
+            localGatewayUrl = "http://127.0.0.1:12346",
+        )
+
+        assertEquals("https://gateway.example/v1", config.environment["OPENAI_API_BASE"])
+        assertEquals("temporary-secret", config.environment["OPENAI_API_KEY"])
     }
 }

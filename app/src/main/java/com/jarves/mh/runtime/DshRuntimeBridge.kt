@@ -11,6 +11,8 @@ import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
 import com.jarves.mh.model.RuntimeEvent
 import com.jarves.mh.model.ToolRequest
+import com.jarves.mh.model.openRouterModelSlug
+import com.jarves.mh.model.normalizeProviderBaseUrl
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.UUID
@@ -85,6 +87,7 @@ class DshRuntimeBridge(
         }
 
         var openRouterGateway: OpenRouterRoutingGateway? = null
+        var openCodeZenGateway: OpenCodeZenGateway? = null
         runCatching {
             RuntimeTaskController.stopAction = {
                 userStopRequested = true
@@ -110,7 +113,12 @@ class DshRuntimeBridge(
             openRouterGateway = if (
                 provider.kind == ProviderKind.LLM_ROUTER && provider.openRouterProviders.isNotEmpty()
             ) OpenRouterRoutingGateway(provider, secret).start() else null
-            val route = if (openRouterGateway != null && baseRoute.custom != null) {
+            openCodeZenGateway = if (provider.kind == ProviderKind.OPENCODE_ZEN) {
+                OpenCodeZenGateway(secret).start()
+            } else null
+            val route = if (openCodeZenGateway != null && baseRoute.custom != null) {
+                baseRoute.copy(custom = baseRoute.custom.copy(baseUrl = openCodeZenGateway!!.baseUrl))
+            } else if (openRouterGateway != null && baseRoute.custom != null) {
                 baseRoute.copy(custom = baseRoute.custom.copy(baseUrl = openRouterGateway!!.url))
             } else {
                 baseRoute
@@ -123,6 +131,14 @@ class DshRuntimeBridge(
                 "DSH_PERMISSION_MODE" to "danger-full-access",
                 route.keyEnv to secret,
             )
+            if (provider.kind == ProviderKind.LLM_ROUTER) {
+                environment["OPENROUTER_API_KEY"] = secret
+                environment["OPENAI_API_KEY"] = secret
+                environment["OPENAI_API_BASE"] = com.jarves.mh.model.openRouterBaseUrl(provider.resolvedBaseUrl)
+            } else if (provider.kind == ProviderKind.CUSTOM && provider.dshApi.startsWith("openai-")) {
+                environment["OPENAI_API_KEY"] = secret
+                environment["OPENAI_API_BASE"] = route.custom?.baseUrl.orEmpty()
+            }
             if (route.keyEnv != FALLBACK_KEY_ENV) environment.remove(FALLBACK_KEY_ENV)
 
             val guestWorkspacePath = "/workspace/$projectSlug"
@@ -147,7 +163,11 @@ class DshRuntimeBridge(
                 process = process,
                 sessionId = sessionId,
                 route = route,
-                model = provider.model.ifBlank { route.defaultModel },
+                model = if (provider.kind == ProviderKind.LLM_ROUTER) {
+                    openRouterModelSlug(provider.model.ifBlank { route.defaultModel })
+                } else {
+                    provider.model.ifBlank { route.defaultModel }
+                },
                 guestWorkspacePath = guestWorkspacePath,
                 prompt = contextPrompt,
             )
@@ -188,6 +208,7 @@ class DshRuntimeBridge(
             }
         }
         openRouterGateway?.close()
+        openCodeZenGateway?.close()
         activeProcess = null
         activeSessionId = null
         RuntimeTaskController.stopAction = null
@@ -307,6 +328,18 @@ class DshRuntimeBridge(
             }
         }
 
+        suspend fun handleLine(line: String) {
+            val actionableError = ProviderRuntimeErrorDetector.detect(line)
+            if (actionableError != null) {
+                failure = actionableError
+                completed = false
+                closeInput()
+                process.destroyForcibly()
+            } else {
+                handle(parser.parseLine(line))
+            }
+        }
+
         while (process.isAlive || nativeProcess.outputFile.length() > outputOffset) {
             if (
                 process.isAlive &&
@@ -333,12 +366,12 @@ class DshRuntimeBridge(
             while (newline >= 0) {
                 val line = pendingOutput.substring(0, newline).trimEnd('\r')
                 pendingOutput.delete(0, newline + 1)
-                if (line.isNotBlank()) handle(parser.parseLine(line))
+                if (line.isNotBlank()) handleLine(line)
                 newline = pendingOutput.indexOf("\n")
             }
         }
         pendingOutput.toString().trim().takeIf(String::isNotBlank)?.let {
-            handle(parser.parseLine(it))
+            handleLine(it)
         }
         closeInput()
         return DshSdkRunResult(completed = completed, failure = failure)
@@ -507,6 +540,7 @@ class DshRuntimeBridge(
 
     private fun friendlyError(error: Throwable): String {
         val message = error.message.orEmpty()
+        ProviderRuntimeErrorDetector.detect(message)?.let { return it }
         return when {
             error is DshSessionException && message.isMeaningfulDshText() -> message
             message.contains("authentication", true) ||
@@ -696,9 +730,9 @@ internal object DshRouteMapper {
             )
             ProviderKind.LLM_ROUTER -> DshRoute(
                 name = "mh-openrouter",
-                keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
+                keyEnv = "OPENROUTER_API_KEY",
                 defaultModel = model,
-                custom = DshCustomRoute("anthropic-messages", profile.resolvedBaseUrl),
+                custom = DshCustomRoute("anthropic-messages", com.jarves.mh.model.openRouterBaseUrl(profile.resolvedBaseUrl)),
             )
             ProviderKind.KIMI -> DshRoute(
                 name = "mh-kimi",
@@ -722,7 +756,13 @@ internal object DshRouteMapper {
                 name = "mh-custom",
                 keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
                 defaultModel = model,
-                custom = DshCustomRoute(profile.dshApi.ifBlank { "anthropic-messages" }, profile.resolvedBaseUrl),
+                custom = DshCustomRoute(
+                    profile.dshApi.ifBlank { "anthropic-messages" },
+                    normalizeProviderBaseUrl(
+                        profile.resolvedBaseUrl,
+                        openAiCompatible = profile.dshApi == "openai-completions" || profile.dshApi == "openai-responses",
+                    ),
+                ),
             )
             ProviderKind.CLAUDE -> throw IllegalArgumentException("Claude subscription login is not supported by DeepSeek Harness")
         }

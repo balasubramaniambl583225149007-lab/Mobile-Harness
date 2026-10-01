@@ -221,6 +221,17 @@ class DshRouteMapperTest {
     }
 
     @Test
+    fun openRouterUsesVersionedUrlKeyAndDeepSeekSlugs() {
+        val route = DshRouteMapper.forProfile(
+            ProviderProfile(ProviderKind.LLM_ROUTER, model = "deepseek-r1:free"),
+        )
+        assertEquals("OPENROUTER_API_KEY", route.keyEnv)
+        assertEquals("https://openrouter.ai/api/v1", route.custom?.baseUrl)
+        assertEquals("deepseek/deepseek-r1:free", com.jarves.mh.model.openRouterModelSlug("deepseek-r1:free"))
+        assertEquals("deepseek/deepseek-chat", com.jarves.mh.model.openRouterModelSlug("deepseek-chat"))
+    }
+
+    @Test
     fun zenUsesFixedUrlAndResponsesProtocol() {
         val route = DshRouteMapper.forProfile(ProviderProfile(ProviderKind.OPENCODE_ZEN))
         assertEquals("opencode-zen", route.name)
@@ -234,6 +245,14 @@ class DshRouteMapperTest {
         val route = DshRouteMapper.forProfile(profile)
         assertEquals("openai-completions", route.custom?.api)
         assertEquals("https://gw.example/v1", route.custom?.baseUrl)
+    }
+
+    @Test
+    fun customOpenAiUrlGetsHttpsAndVersionPrefix() {
+        val route = DshRouteMapper.forProfile(
+            ProviderProfile(ProviderKind.CUSTOM, baseUrl = "  gateway.example  ", dshApi = "openai-responses"),
+        )
+        assertEquals("https://gateway.example/v1", route.custom?.baseUrl)
     }
 
     @Test
@@ -267,7 +286,7 @@ class AgentProviderPresetTest {
             dshApi = "openai-completions",
         )
         assertEquals(ProviderProtocol.OPENAI_CHAT, providerProtocolForAgent(profile, AgentKind.DEEPSEEK_HARNESS))
-        assertEquals(ProviderProtocol.ANTHROPIC_GATEWAY, providerProtocolForAgent(profile, AgentKind.CLAUDE_CODE))
+        assertEquals(ProviderProtocol.OPENAI_CHAT, providerProtocolForAgent(profile, AgentKind.CLAUDE_CODE))
     }
 
     @Test
@@ -302,9 +321,10 @@ class AgentProviderPresetTest {
     }
 
     @Test
-    fun openCodeZenIsOnlyShownForDeepSeekHarness() {
+    fun openCodeZenIsAvailableForClaudeAndDeepSeekHarness() {
         assertTrue(ProviderKind.OPENCODE_ZEN in providersForAgent(AgentKind.DEEPSEEK_HARNESS))
-        assertFalse(ProviderKind.OPENCODE_ZEN in providersForAgent(AgentKind.CLAUDE_CODE))
+        assertTrue(ProviderKind.OPENCODE_ZEN in providersForAgent(AgentKind.CLAUDE_CODE))
+        assertTrue(ProviderKind.OPENCODE_ZEN in providersForAgent(AgentKind.OPENCODE))
     }
 
     @Test

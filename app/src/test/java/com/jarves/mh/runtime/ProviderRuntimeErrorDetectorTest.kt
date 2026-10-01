@@ -23,6 +23,14 @@ class ProviderRuntimeErrorDetectorTest {
     }
 
     @Test
+    fun nimWorkerExhaustionSuggestsFallbackProviders() {
+        assertEquals(
+            "NVIDIA NIM's shared worker queue is full. Switch to an OpenRouter free model such as deepseek/deepseek-r1:free, or use a Custom Provider endpoint.",
+            ProviderRuntimeErrorDetector.detect("ResourceExhausted: Worker local total request limit reached (16/16)"),
+        )
+    }
+
+    @Test
     fun ordinaryRuntimeOutputIsNotFatal() {
         assertNull(ProviderRuntimeErrorDetector.detect("Claude Code connected"))
     }

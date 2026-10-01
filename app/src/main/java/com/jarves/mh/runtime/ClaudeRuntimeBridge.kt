@@ -46,6 +46,10 @@ internal object ProviderRuntimeErrorDetector {
             }
         }.lowercase()
         return when {
+            "resourceexhausted" in combined ||
+                "worker local total request limit reached" in combined ||
+                "16/16" in combined ->
+                "NVIDIA NIM's shared worker queue is full. Switch to an OpenRouter free model such as deepseek/deepseek-r1:free, or use a Custom Provider endpoint."
             "user not found" in combined -> "User not found. Check the API key and provider account."
             "authentication_failed" in combined ||
                 "authentication failed" in combined ||
@@ -141,7 +145,7 @@ class ClaudeRuntimeBridge(
             val workspace = ensureWorkspace(projectId)
             createCheckpoint(projectId, workspace)
             val before = snapshot(workspace)
-            formatGateway = if (provider.kind.protocol in setOf(
+            formatGateway = if (com.jarves.mh.model.providerProtocolForAgent(provider, com.jarves.mh.model.AgentKind.CLAUDE_CODE) in setOf(
                     com.jarves.mh.model.ProviderProtocol.OPENAI_CHAT,
                     com.jarves.mh.model.ProviderProtocol.OPENAI_RESPONSES,
                 )) LocalFormatGateway(provider, secret).start() else null

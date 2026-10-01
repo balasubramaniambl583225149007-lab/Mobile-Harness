@@ -159,6 +159,8 @@ class ProviderApiClient {
                     // OpenCode Zen expects requests to identify the OpenCode client and session.
                     setRequestProperty("User-Agent", "opencode/1.18.20")
                     setRequestProperty("x-session-id", "session-${UUID.randomUUID()}")
+                    setRequestProperty("x-opencode-client", "opencode")
+                    setRequestProperty("x-opencode-version", "1.18.20")
                 }
                 if (apiKey.isNotBlank() && protocol != ProviderProtocol.OPENROUTER && protocol != ProviderProtocol.OPENAI_CHAT && protocol != ProviderProtocol.OPENAI_RESPONSES) {
                     setRequestProperty("x-api-key", apiKey)
