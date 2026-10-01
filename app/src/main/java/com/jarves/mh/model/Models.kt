@@ -72,6 +72,12 @@ enum class AgentKind(
         "Google's official coding agent · Google account",
         "39.9 MB",
     ),
+    OPENCODE(
+        "opencode",
+        "OpenCode",
+        "Open-source AI coding assistant · OpenCode Zen",
+        "15.6 MB",
+    ),
     ;
 
     companion object {
@@ -145,6 +151,7 @@ fun providersForAgent(agent: AgentKind): List<ProviderKind> = when (agent) {
     AgentKind.DEEPSEEK_HARNESS -> ProviderKind.entries.filter { it in DEEPSEEK_HARNESS_PROVIDERS }
     AgentKind.CLAUDE_CODE -> ProviderKind.entries.filterNot { it == ProviderKind.OPENCODE_ZEN }
     AgentKind.ANTIGRAVITY -> emptyList()
+    AgentKind.OPENCODE -> listOf(ProviderKind.OPENCODE_ZEN)
 }
 
 data class ProviderProfile(

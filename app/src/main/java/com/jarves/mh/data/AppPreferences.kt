@@ -179,9 +179,11 @@ class AppPreferences(private val context: Context) {
             storedModel == ProviderKind.ANTHROPIC.defaultModel
         val kind = when {
             agent == null -> storedKind ?: ProviderKind.ANTHROPIC
+            agent == AgentKind.OPENCODE && !hasAgentProfile -> ProviderKind.OPENCODE_ZEN
             agent == AgentKind.DEEPSEEK_HARNESS && (!hasAgentProfile || legacyClaudeDefaultInDeepSeek) -> ProviderKind.DEEPSEEK
             storedKind != null && storedKind in providersForAgent(agent) -> storedKind
             agent == AgentKind.DEEPSEEK_HARNESS -> ProviderKind.DEEPSEEK
+            agent == AgentKind.OPENCODE -> ProviderKind.OPENCODE_ZEN
             else -> ProviderKind.ANTHROPIC
         }
         val useStoredValues = storedKind == kind
