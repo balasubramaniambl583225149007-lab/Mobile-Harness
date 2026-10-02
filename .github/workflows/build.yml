@@ -1,0 +1,52 @@
+name: Build and Release Debug APK
+
+on:
+  push:
+    branches:
+      - fix/agents-editor
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'ndk;26.1.10909125'
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build Online Debug APK
+        run: ./gradlew assembleOnlineDebug --stacktrace
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-online-debug
+          path: app/build/outputs/apk/**/*.apk
+
+      - name: Create GitHub Pre-Release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s globstar nullglob
+          apk_files=(app/build/outputs/apk/**/*.apk)
+          gh release create "debug-${{ github.run_number }}" "${apk_files[@]}" \
+            --title "Debug Build ${{ github.run_number }}" \
+            --notes "Commit: ${{ github.sha }}" \
+            --prerelease
