@@ -3027,8 +3027,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val tab = _state.value.openEditorTabs.find { it.path == relativePath } ?: return
         viewModelScope.launch {
             val root = projectWorkspaceRoot(project)
-            val file = File(root, relativePath).canonicalFile
-            if (!file.toPath().startsWith(root.canonicalFile.toPath())) {
+            val rootCanonical = runCatching { root.canonicalFile }.getOrNull()
+            val file = runCatching { File(root, relativePath).canonicalFile }.getOrNull()
+            if (rootCanonical == null || file == null || !file.toPath().startsWith(rootCanonical.toPath())) {
                 _state.update { it.copy(toastMessage = "Invalid file path") }
                 return@launch
             }
@@ -3091,10 +3092,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } else tab
             }
 
+            val rootCanonical = runCatching { root.canonicalFile }.getOrNull()
             val updatedTabs = currentTabs.map { tab ->
                 if (!tab.isModified && tab.path != activePath) return@map tab
-                val file = File(root, tab.path).canonicalFile
-                if (!file.toPath().startsWith(root.canonicalFile.toPath())) return@map tab
+                val file = runCatching { File(root, tab.path).canonicalFile }.getOrNull() ?: return@map tab
+                if (rootCanonical == null || !file.toPath().startsWith(rootCanonical.toPath())) return@map tab
 
                 val diskMod = withContext(Dispatchers.IO) { file.lastModified() }
                 if (file.exists() && diskMod > tab.diskModifiedTime) {
@@ -3136,8 +3138,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val project = _state.value.activeProject ?: return
         viewModelScope.launch {
             val root = projectWorkspaceRoot(project)
-            val file = File(root, relativePath).canonicalFile
-            if (!file.isFile) {
+            val rootCanonical = runCatching { root.canonicalFile }.getOrNull()
+            val file = runCatching { File(root, relativePath).canonicalFile }.getOrNull()
+            if (rootCanonical == null || file == null || !file.toPath().startsWith(rootCanonical.toPath()) || !file.isFile) {
                 _state.update { it.copy(toastMessage = "File does not exist on disk") }
                 return@launch
             }
@@ -3180,7 +3183,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val project = _state.value.activeProject ?: return
         viewModelScope.launch {
             val root = projectWorkspaceRoot(project)
-            val file = File(root, relativePath).canonicalFile
+            val file = runCatching { File(root, relativePath).canonicalFile }.getOrNull() ?: return@launch
             val modTime = withContext(Dispatchers.IO) { file.lastModified() }
             _state.update { state ->
                 val updated = state.openEditorTabs.map { tab ->
@@ -3232,13 +3235,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val project = _state.value.activeProject ?: return
         viewModelScope.launch {
             val root = projectWorkspaceRoot(project)
-            val parent = if (parentDirRelative.isBlank()) root else File(root, parentDirRelative).canonicalFile
-            if (!parent.toPath().startsWith(root.canonicalFile.toPath())) {
+            val rootCanonical = runCatching { root.canonicalFile }.getOrNull()
+            val parent = runCatching {
+                if (parentDirRelative.isBlank()) rootCanonical else File(root, parentDirRelative).canonicalFile
+            }.getOrNull()
+            if (parent == null || rootCanonical == null || !parent.toPath().startsWith(rootCanonical.toPath())) {
                 _state.update { it.copy(toastMessage = "Invalid directory path") }
                 return@launch
             }
-            val target = File(parent, trimmed).canonicalFile
-            if (!target.toPath().startsWith(root.canonicalFile.toPath())) {
+            val target = runCatching { File(parent, trimmed).canonicalFile }.getOrNull()
+            if (target == null || !target.toPath().startsWith(rootCanonical.toPath())) {
                 _state.update { it.copy(toastMessage = "Invalid file name") }
                 return@launch
             }
@@ -3274,13 +3280,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val project = _state.value.activeProject ?: return
         viewModelScope.launch {
             val root = projectWorkspaceRoot(project)
-            val parent = if (parentDirRelative.isBlank()) root else File(root, parentDirRelative).canonicalFile
-            if (!parent.toPath().startsWith(root.canonicalFile.toPath())) {
+            val rootCanonical = runCatching { root.canonicalFile }.getOrNull()
+            val parent = runCatching {
+                if (parentDirRelative.isBlank()) rootCanonical else File(root, parentDirRelative).canonicalFile
+            }.getOrNull()
+            if (parent == null || rootCanonical == null || !parent.toPath().startsWith(rootCanonical.toPath())) {
                 _state.update { it.copy(toastMessage = "Invalid directory path") }
                 return@launch
             }
-            val target = File(parent, trimmed).canonicalFile
-            if (!target.toPath().startsWith(root.canonicalFile.toPath())) {
+            val target = runCatching { File(parent, trimmed).canonicalFile }.getOrNull()
+            if (target == null || !target.toPath().startsWith(rootCanonical.toPath())) {
                 _state.update { it.copy(toastMessage = "Invalid folder name") }
                 return@launch
             }
@@ -3311,13 +3320,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val project = _state.value.activeProject ?: return
         viewModelScope.launch {
             val root = projectWorkspaceRoot(project)
-            val oldFile = File(root, oldRelativePath).canonicalFile
-            if (!oldFile.toPath().startsWith(root.canonicalFile.toPath())) {
+            val rootCanonical = runCatching { root.canonicalFile }.getOrNull()
+            val oldFile = runCatching { File(root, oldRelativePath).canonicalFile }.getOrNull()
+            if (oldFile == null || rootCanonical == null || !oldFile.toPath().startsWith(rootCanonical.toPath())) {
                 _state.update { it.copy(toastMessage = "Invalid path") }
                 return@launch
             }
-            val newFile = File(oldFile.parentFile, trimmed).canonicalFile
-            if (!newFile.toPath().startsWith(root.canonicalFile.toPath())) {
+            val parentFile = oldFile.parentFile ?: rootCanonical
+            val newFile = runCatching { File(parentFile, trimmed).canonicalFile }.getOrNull()
+            if (newFile == null || !newFile.toPath().startsWith(rootCanonical.toPath())) {
                 _state.update { it.copy(toastMessage = "Invalid new name") }
                 return@launch
             }
@@ -3327,7 +3338,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             val success = withContext(Dispatchers.IO) {
-                oldFile.renameTo(newFile)
+                runCatching { oldFile.renameTo(newFile) }.getOrDefault(false)
             }
 
             if (success) {
@@ -3361,14 +3372,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val project = _state.value.activeProject ?: return
         viewModelScope.launch {
             val root = projectWorkspaceRoot(project)
-            val target = File(root, relativePath).canonicalFile
-            if (!target.toPath().startsWith(root.canonicalFile.toPath()) || target == root.canonicalFile) {
+            val rootCanonical = runCatching { root.canonicalFile }.getOrNull()
+            val target = runCatching { File(root, relativePath).canonicalFile }.getOrNull()
+            if (target == null || rootCanonical == null || !target.toPath().startsWith(rootCanonical.toPath()) || target == rootCanonical) {
                 _state.update { it.copy(toastMessage = "Cannot delete root or outside project") }
                 return@launch
             }
 
             val deleted = withContext(Dispatchers.IO) {
-                target.deleteRecursively()
+                runCatching { target.deleteRecursively() }.getOrDefault(false)
             }
 
             if (deleted) {
