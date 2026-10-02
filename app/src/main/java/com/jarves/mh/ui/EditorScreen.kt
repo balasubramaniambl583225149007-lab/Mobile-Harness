@@ -350,8 +350,18 @@ fun EditorScreen(
                         }
                         IconButton(
                             onClick = {
-                                webViewRef?.evaluateJavascript("window.syncContentToAndroid()", null)
-                                onSaveAll(activeTab?.path, activeTab?.content)
+                                if (webViewRef != null && activeTab != null) {
+                                    webViewRef?.evaluateJavascript("window.editorBridge ? window.editorBridge.getContent() : null") { result ->
+                                        val latestContent = if (!result.isNullOrBlank() && result != "null") {
+                                            runCatching { org.json.JSONTokener(result).nextValue() as? String }.getOrNull() ?: activeTab.content
+                                        } else {
+                                            activeTab.content
+                                        }
+                                        onSaveAll(activeTab.path, latestContent)
+                                    }
+                                } else {
+                                    onSaveAll(activeTab?.path, activeTab?.content)
+                                }
                             },
                             enabled = openTabs.isNotEmpty(),
                         ) {
@@ -651,9 +661,22 @@ fun EditorScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        webViewRef?.evaluateJavascript("window.requestSave()", null)
-                        onCloseTab(tab.path)
-                        tabToCloseUnsaved = null
+                        if (tab.path == activeTabPath && webViewRef != null) {
+                            webViewRef?.evaluateJavascript("window.editorBridge ? window.editorBridge.getContent() : null") { result ->
+                                val latestContent = if (!result.isNullOrBlank() && result != "null") {
+                                    runCatching { org.json.JSONTokener(result).nextValue() as? String }.getOrNull() ?: tab.content
+                                } else {
+                                    tab.content
+                                }
+                                onSaveTab(tab.path, latestContent)
+                                onCloseTab(tab.path)
+                                tabToCloseUnsaved = null
+                            }
+                        } else {
+                            onSaveTab(tab.path, tab.content)
+                            onCloseTab(tab.path)
+                            tabToCloseUnsaved = null
+                        }
                     },
                 ) {
                     Text("Save & Close")
