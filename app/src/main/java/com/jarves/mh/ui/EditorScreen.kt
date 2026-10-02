@@ -3,6 +3,7 @@ package com.jarves.mh.ui
 import android.annotation.SuppressLint
 import android.content.Context
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -750,8 +751,15 @@ private fun CodeMirrorWebView(
                     loadWithOverviewMode = true
                     setSupportZoom(false)
                     allowFileAccess = true
+                    allowFileAccessFromFileURLs = false
+                    allowUniversalAccessFromFileURLs = false
                 }
-                webViewClient = object : WebViewClient() {}
+                webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                        val url = request?.url?.toString().orEmpty()
+                        return !url.startsWith("file:///android_asset/editor/")
+                    }
+                }
                 addJavascriptInterface(bridge, "AndroidBridge")
                 loadUrl("file:///android_asset/editor/index.html")
                 onWebViewCreated(this)
