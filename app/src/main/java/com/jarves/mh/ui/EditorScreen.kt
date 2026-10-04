@@ -2,7 +2,11 @@ package com.jarves.mh.ui
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.util.Log
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -27,6 +31,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -36,6 +41,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
@@ -55,6 +62,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Menu
@@ -91,17 +99,25 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -110,6 +126,7 @@ import com.jarves.mh.model.EditorTab
 import com.jarves.mh.model.WorkspaceEntry
 import com.jarves.mh.ui.theme.PocketGreen
 import com.jarves.mh.ui.theme.PocketOrange
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private val VSCODE_BG = Color(0xFF1E1E1E)
@@ -122,36 +139,50 @@ private val VSCODE_TEXT_MUTED = Color(0xFF888888)
 private val VSCODE_ACCENT = Color(0xFF007ACC)
 private val VSCODE_KEY_BG = Color(0xFF2A2D2E)
 
-private class EditorWebBridge(
+internal class EditorWebBridge(
     private val getActiveTab: () -> EditorTab?,
     private val onContentChange: (filename: String, isModified: Boolean) -> Unit,
     private val onSaveRequested: (content: String) -> Unit,
     private val onSyncRequested: (content: String, isModified: Boolean) -> Unit,
     private val onReady: () -> Unit,
+    private val onLog: ((String) -> Unit)? = null,
 ) {
     @JavascriptInterface
-    fun getActiveTabContent(): String = getActiveTab()?.content ?: ""
+    fun getActiveTabContent(): String {
+        val tab = getActiveTab()
+        val content = tab?.content ?: ""
+        onLog?.invoke("getActiveTabContent() returning ${content.length} chars for '${tab?.name}'")
+        return content
+    }
 
     @JavascriptInterface
-    fun getActiveTabName(): String = getActiveTab()?.name ?: ""
+    fun getActiveTabName(): String {
+        val name = getActiveTab()?.name ?: ""
+        onLog?.invoke("getActiveTabName() returning '$name'")
+        return name
+    }
 
     @JavascriptInterface
     fun onContentChanged(filename: String, isModified: Boolean) {
+        onLog?.invoke("onContentChanged($filename, modified=$isModified)")
         onContentChange(filename, isModified)
     }
 
     @JavascriptInterface
     fun onSave(content: String) {
+        onLog?.invoke("onSave(chars=${content.length})")
         onSaveRequested(content)
     }
 
     @JavascriptInterface
     fun onSyncContent(content: String, isModified: Boolean) {
+        onLog?.invoke("onSyncContent(chars=${content.length}, modified=$isModified)")
         onSyncRequested(content, isModified)
     }
 
     @JavascriptInterface
     fun onEditorReady() {
+        onLog?.invoke("onEditorReady() received from JS")
         onReady()
     }
 
@@ -160,6 +191,93 @@ private class EditorWebBridge(
 
     @JavascriptInterface
     fun onFontSizeChanged(size: Float) {}
+}
+
+data class EditorDiagnosticsInfo(
+    val indexHtmlExists: Boolean,
+    val indexHtmlBytes: Long,
+    val bundleJsExists: Boolean,
+    val bundleJsBytes: Long,
+    val bridgeAttached: Boolean,
+    val pageFinished: Boolean,
+    val editorReady: Boolean,
+    val activeTabPath: String?,
+    val activeTabName: String?,
+    val activeTabContentLength: Int,
+    val isModified: Boolean,
+    val isPartiallyLoaded: Boolean,
+    val logs: List<String>,
+) {
+    fun toFormattedString(): String {
+        return buildString {
+            appendLine("=== Editor Diagnostics ===")
+            appendLine("Assets:")
+            appendLine("  editor/index.html: ${if (indexHtmlExists) "$indexHtmlBytes bytes" else "NOT FOUND"}")
+            appendLine("  editor/editor.bundle.js: ${if (bundleJsExists) "${bundleJsBytes / 1024} KB ($bundleJsBytes bytes)" else "NOT FOUND"}")
+            appendLine("Status:")
+            appendLine("  AndroidBridge Attached: $bridgeAttached")
+            appendLine("  Page Finished: $pageFinished")
+            appendLine("  Editor Ready: $editorReady")
+            appendLine("Active Tab:")
+            appendLine("  Path: ${activeTabPath ?: "(None)"}")
+            appendLine("  Name: ${activeTabName ?: "(None)"}")
+            appendLine("  Content Length: $activeTabContentLength chars")
+            appendLine("  Modified: $isModified")
+            appendLine("  Partial Load: $isPartiallyLoaded")
+            appendLine("Recent Logs (${logs.size}):")
+            if (logs.isEmpty()) {
+                appendLine("  (None)")
+            } else {
+                logs.takeLast(30).forEach { appendLine("  $it") }
+            }
+        }
+    }
+}
+
+internal fun checkEditorDiagnostics(
+    context: Context,
+    openTabs: List<EditorTab>,
+    activeTabPath: String?,
+    editorReady: Boolean,
+    pageFinished: Boolean,
+    logs: List<String>,
+): EditorDiagnosticsInfo {
+    var indexExists = false
+    var indexBytes = 0L
+    var bundleExists = false
+    var bundleBytes = 0L
+
+    try {
+        context.assets.open("editor/index.html").use { input ->
+            indexBytes = input.readBytes().size.toLong()
+            indexExists = true
+        }
+    } catch (_: Exception) {}
+
+    try {
+        context.assets.open("editor/editor.bundle.js").use { input ->
+            bundleBytes = input.readBytes().size.toLong()
+            bundleExists = true
+        }
+    } catch (_: Exception) {}
+
+    val activeTab = openTabs.find { it.path == activeTabPath }
+
+    return EditorDiagnosticsInfo(
+        indexHtmlExists = indexExists,
+        indexHtmlBytes = indexBytes,
+        bundleJsExists = bundleExists,
+        bundleJsBytes = bundleBytes,
+        bridgeAttached = true,
+        pageFinished = pageFinished,
+        editorReady = editorReady,
+        activeTabPath = activeTab?.path,
+        activeTabName = activeTab?.name,
+        activeTabContentLength = activeTab?.content?.length ?: 0,
+        isModified = activeTab?.isModified == true,
+        isPartiallyLoaded = activeTab?.isPartiallyLoaded == true,
+        logs = logs,
+    )
 }
 
 private sealed interface EditorCrudAction {
@@ -194,8 +312,26 @@ fun EditorScreen(
 ) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val activeTab = openTabs.find { it.path == activeTabPath }
+    val currentTabs by rememberUpdatedState(openTabs)
+    val currentActiveTabPath by rememberUpdatedState(activeTabPath)
+    val currentActiveTab by rememberUpdatedState<EditorTab?>(activeTab)
+    val currentOnUpdateTabContent by rememberUpdatedState(onUpdateTabContent)
+    val currentOnSaveTab by rememberUpdatedState(onSaveTab)
+
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var editorReady by remember { mutableStateOf(false) }
+    var pageFinished by remember { mutableStateOf(false) }
+    var showFallbackEditor by remember { mutableStateOf(false) }
+    var showDiagnosticsDialog by remember { mutableStateOf(false) }
+    val consoleLogs = remember { mutableStateListOf<String>() }
+
+    fun addLog(msg: String) {
+        if (consoleLogs.size > 100) {
+            consoleLogs.removeAt(0)
+        }
+        consoleLogs.add(msg)
+    }
 
     // Dialog states
     var activeCrudAction by remember { mutableStateOf<EditorCrudAction?>(null) }
@@ -206,27 +342,25 @@ fun EditorScreen(
     val collapsedDirs = remember { mutableStateMapOf<String, Boolean>() }
     var fileSearchQuery by remember { mutableStateOf("") }
 
-    val activeTab = openTabs.find { it.path == activeTabPath }
-
     // Bridge for WebView
     val bridge = remember {
         EditorWebBridge(
-            getActiveTab = { activeTab },
-            onContentChange = { _, isModified ->
-                activeTabPath?.let { path ->
-                    activeTab?.let { tab ->
-                        onUpdateTabContent(path, tab.content, isModified)
+            getActiveTab = { currentActiveTab },
+            onContentChange = { filename, isModified ->
+                currentActiveTabPath?.let { path ->
+                    currentActiveTab?.let { tab ->
+                        currentOnUpdateTabContent(path, tab.content, isModified)
                     }
                 }
             },
             onSaveRequested = { content ->
-                activeTabPath?.let { path ->
-                    onSaveTab(path, content)
+                currentActiveTabPath?.let { path ->
+                    currentOnSaveTab(path, content)
                 }
             },
             onSyncRequested = { content, isModified ->
-                activeTabPath?.let { path ->
-                    onUpdateTabContent(path, content, isModified)
+                currentActiveTabPath?.let { path ->
+                    currentOnUpdateTabContent(path, content, isModified)
                 }
             },
             onReady = {
@@ -235,6 +369,7 @@ fun EditorScreen(
                     webViewRef?.evaluateJavascript("window.loadTabFromAndroid()", null)
                 }
             },
+            onLog = { addLog("[Bridge] $it") },
         )
     }
 
@@ -242,6 +377,19 @@ fun EditorScreen(
     LaunchedEffect(activeTabPath, editorReady) {
         if (editorReady && activeTabPath != null) {
             webViewRef?.evaluateJavascript("window.loadTabFromAndroid()", null)
+        }
+    }
+
+    // 3-second fallback safety net timer
+    LaunchedEffect(activeTabPath, editorReady) {
+        if (activeTabPath != null && !editorReady) {
+            delay(3000L)
+            if (!editorReady) {
+                showFallbackEditor = true
+                addLog("[Safety Net] 3-second timeout reached without onEditorReady; fallback editor active")
+            }
+        } else if (editorReady) {
+            showFallbackEditor = false
         }
     }
 
@@ -326,31 +474,39 @@ fun EditorScreen(
                     actions = {
                         IconButton(
                             onClick = { webViewRef?.evaluateJavascript("window.editorBridge.undo()", null) },
-                            enabled = activeTab != null,
+                            enabled = activeTab != null && !showFallbackEditor,
                         ) {
-                            Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo", tint = if (activeTab != null) Color.White else VSCODE_TEXT_MUTED)
+                            Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo", tint = if (activeTab != null && !showFallbackEditor) Color.White else VSCODE_TEXT_MUTED)
                         }
                         IconButton(
                             onClick = { webViewRef?.evaluateJavascript("window.editorBridge.redo()", null) },
-                            enabled = activeTab != null,
+                            enabled = activeTab != null && !showFallbackEditor,
                         ) {
-                            Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo", tint = if (activeTab != null) Color.White else VSCODE_TEXT_MUTED)
+                            Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo", tint = if (activeTab != null && !showFallbackEditor) Color.White else VSCODE_TEXT_MUTED)
                         }
                         IconButton(
                             onClick = { webViewRef?.evaluateJavascript("window.editorBridge.openSearch()", null) },
-                            enabled = activeTab != null,
+                            enabled = activeTab != null && !showFallbackEditor,
                         ) {
-                            Icon(Icons.Default.Search, contentDescription = "Search", tint = if (activeTab != null) Color.White else VSCODE_TEXT_MUTED)
+                            Icon(Icons.Default.Search, contentDescription = "Search", tint = if (activeTab != null && !showFallbackEditor) Color.White else VSCODE_TEXT_MUTED)
                         }
                         IconButton(
-                            onClick = { webViewRef?.evaluateJavascript("window.requestSave()", null) },
+                            onClick = {
+                                if (showFallbackEditor) {
+                                    activeTab?.let { onSaveTab(it.path, it.content) }
+                                } else {
+                                    webViewRef?.evaluateJavascript("window.requestSave()", null)
+                                }
+                            },
                             enabled = activeTab != null,
                         ) {
                             Icon(Icons.Default.Save, contentDescription = "Save", tint = if (activeTab?.isModified == true) PocketOrange else Color.White)
                         }
                         IconButton(
                             onClick = {
-                                if (webViewRef != null && activeTab != null) {
+                                if (showFallbackEditor) {
+                                    onSaveAll(activeTab?.path, activeTab?.content)
+                                } else if (webViewRef != null && activeTab != null) {
                                     webViewRef?.evaluateJavascript("window.editorBridge ? window.editorBridge.getContent() : null") { result ->
                                         val latestContent = if (!result.isNullOrBlank() && result != "null") {
                                             runCatching { org.json.JSONTokener(result).nextValue() as? String }.getOrNull() ?: activeTab.content
@@ -366,6 +522,11 @@ fun EditorScreen(
                             enabled = openTabs.isNotEmpty(),
                         ) {
                             Icon(Icons.Default.SaveAs, contentDescription = "Save All", tint = Color.White)
+                        }
+                        IconButton(
+                            onClick = { showDiagnosticsDialog = true },
+                        ) {
+                            Icon(Icons.Default.Info, contentDescription = "Diagnostics", tint = Color.White)
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -457,6 +618,43 @@ fun EditorScreen(
                     }
                 }
 
+                // Fallback Safety Net Banner (when editor failed to load after 3s)
+                if (showFallbackEditor && activeTab != null) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF4A2A18)),
+                        shape = RoundedCornerShape(6.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Default.Warning, contentDescription = null, tint = PocketOrange, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Editor failed to load. Tap to retry",
+                                color = Color(0xFFFFD1B3),
+                                fontSize = 12.sp,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            TextButton(
+                                onClick = {
+                                    showFallbackEditor = false
+                                    editorReady = false
+                                    pageFinished = false
+                                    webViewRef?.reload()
+                                },
+                            ) {
+                                Text("Retry", color = PocketOrange, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                            TextButton(onClick = { showDiagnosticsDialog = true }) {
+                                Text("Diagnostics", color = VSCODE_TEXT, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+
                 // Main Editor Area or Empty State
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     if (openTabs.isEmpty()) {
@@ -480,10 +678,20 @@ fun EditorScreen(
                                 Text("Open Explorer")
                             }
                         }
+                    } else if (showFallbackEditor && activeTab != null) {
+                        NativeFallbackEditor(
+                            content = activeTab.content,
+                            onContentChange = { newText ->
+                                onUpdateTabContent(activeTab.path, newText, true)
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                        )
                     } else {
                         CodeMirrorWebView(
                             bridge = bridge,
                             onWebViewCreated = { webViewRef = it },
+                            onConsoleLog = { addLog(it) },
+                            onPageFinishedState = { pageFinished = it },
                         )
                     }
                 }
@@ -492,13 +700,27 @@ fun EditorScreen(
                 if (openTabs.isNotEmpty()) {
                     EditorExtraKeysRow(
                         onInsertText = { text ->
-                            webViewRef?.evaluateJavascript("window.editorBridge.insertText(${org.json.JSONObject.quote(text)})", null)
+                            if (showFallbackEditor) {
+                                activeTab?.let { tab ->
+                                    onUpdateTabContent(tab.path, tab.content + text, true)
+                                }
+                            } else {
+                                webViewRef?.evaluateJavascript("window.editorBridge.insertText(${org.json.JSONObject.quote(text)})", null)
+                            }
                         },
                         onIndent = {
-                            webViewRef?.evaluateJavascript("window.editorBridge.indent()", null)
+                            if (showFallbackEditor) {
+                                activeTab?.let { tab ->
+                                    onUpdateTabContent(tab.path, tab.content + "    ", true)
+                                }
+                            } else {
+                                webViewRef?.evaluateJavascript("window.editorBridge.indent()", null)
+                            }
                         },
                         onMoveCursor = { direction ->
-                            webViewRef?.evaluateJavascript("window.editorBridge.moveCursor('$direction')", null)
+                            if (!showFallbackEditor) {
+                                webViewRef?.evaluateJavascript("window.editorBridge.moveCursor('$direction')", null)
+                            }
                         },
                     )
                 }
@@ -697,6 +919,32 @@ fun EditorScreen(
             },
         )
     }
+
+    if (showDiagnosticsDialog) {
+        val context = LocalContext.current
+        val diagnosticsInfo = remember(context, openTabs, activeTabPath, editorReady, pageFinished, consoleLogs.size) {
+            checkEditorDiagnostics(
+                context = context,
+                openTabs = openTabs,
+                activeTabPath = activeTabPath,
+                editorReady = editorReady,
+                pageFinished = pageFinished,
+                logs = consoleLogs.toList(),
+            )
+        }
+
+        EditorDiagnosticsDialog(
+            diagnostics = diagnosticsInfo,
+            onDismiss = { showDiagnosticsDialog = false },
+            onForceReload = {
+                showDiagnosticsDialog = false
+                showFallbackEditor = false
+                editorReady = false
+                pageFinished = false
+                webViewRef?.reload()
+            },
+        )
+    }
 }
 
 @Composable
@@ -759,6 +1007,8 @@ private fun EditorTabsRow(
 private fun CodeMirrorWebView(
     bridge: EditorWebBridge,
     onWebViewCreated: (WebView) -> Unit,
+    onConsoleLog: (String) -> Unit,
+    onPageFinishedState: (Boolean) -> Unit,
 ) {
     AndroidView(
         modifier = Modifier.fillMaxSize(),
@@ -768,19 +1018,51 @@ private fun CodeMirrorWebView(
                 settings.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
+                    databaseEnabled = true
                     builtInZoomControls = false
                     displayZoomControls = false
                     useWideViewPort = false
                     loadWithOverviewMode = true
                     setSupportZoom(false)
                     allowFileAccess = true
-                    allowFileAccessFromFileURLs = false
-                    allowUniversalAccessFromFileURLs = false
+                    allowFileAccessFromFileURLs = true
+                    allowUniversalAccessFromFileURLs = true
+                }
+                webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                        val msg = consoleMessage?.message().orEmpty()
+                        val level = consoleMessage?.messageLevel()
+                        val line = consoleMessage?.lineNumber()
+                        val source = consoleMessage?.sourceId()?.substringAfterLast('/') ?: "unknown"
+                        val logText = "[$level] $msg ($source:$line)"
+                        Log.d("EditorJS", logText)
+                        onConsoleLog(logText)
+                        return true
+                    }
                 }
                 webViewClient = object : WebViewClient() {
                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                         val url = request?.url?.toString().orEmpty()
                         return !url.startsWith("file:///android_asset/editor/")
+                    }
+
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        Log.d("EditorScreen", "onPageFinished: $url")
+                        onConsoleLog("[WebView] Page finished: $url")
+                        onPageFinishedState(true)
+                        view?.post {
+                            view.evaluateJavascript("if (typeof window.loadTabFromAndroid === 'function') { window.loadTabFromAndroid(); }", null)
+                        }
+                    }
+
+                    override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                        super.onReceivedError(view, request, error)
+                        val errDesc = error?.description?.toString() ?: "Unknown error"
+                        val errCode = error?.errorCode ?: 0
+                        val logText = "[WebView Error $errCode] $errDesc for ${request?.url}"
+                        Log.e("EditorScreen", logText)
+                        onConsoleLog(logText)
                     }
                 }
                 addJavascriptInterface(bridge, "AndroidBridge")
@@ -789,6 +1071,205 @@ private fun CodeMirrorWebView(
             }
         },
     )
+}
+
+@Composable
+private fun NativeFallbackEditor(
+    content: String,
+    onContentChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var textFieldValue by remember(content) {
+        mutableStateOf(TextFieldValue(text = content))
+    }
+
+    LaunchedEffect(content) {
+        if (textFieldValue.text != content) {
+            textFieldValue = textFieldValue.copy(text = content)
+        }
+    }
+
+    val lineCount = remember(textFieldValue.text) {
+        textFieldValue.text.count { it == '\n' } + 1
+    }
+
+    val scrollState = rememberScrollState()
+
+    Row(
+        modifier = modifier
+            .fillMaxSize()
+            .background(VSCODE_BG)
+            .verticalScroll(scrollState),
+    ) {
+        Column(
+            modifier = Modifier
+                .width(44.dp)
+                .background(Color(0xFF252526))
+                .padding(vertical = 8.dp, horizontal = 6.dp),
+            horizontalAlignment = Alignment.End,
+        ) {
+            for (i in 1..lineCount) {
+                Text(
+                    text = "$i",
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFF858585),
+                    lineHeight = 18.sp,
+                )
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        BasicTextField(
+            value = textFieldValue,
+            onValueChange = { next ->
+                textFieldValue = next
+                if (next.text != content) {
+                    onContentChange(next.text)
+                }
+            },
+            textStyle = TextStyle(
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                color = Color(0xFFD4D4D4),
+                lineHeight = 18.sp,
+            ),
+            cursorBrush = SolidColor(PocketOrange),
+            modifier = Modifier
+                .weight(1f)
+                .padding(vertical = 8.dp, horizontal = 4.dp),
+        )
+    }
+}
+
+@Composable
+private fun EditorDiagnosticsDialog(
+    diagnostics: EditorDiagnosticsInfo,
+    onDismiss: () -> Unit,
+    onForceReload: () -> Unit,
+) {
+    val clipboardManager = LocalClipboardManager.current
+    var copied by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Info, contentDescription = null, tint = VSCODE_ACCENT)
+                Spacer(Modifier.width(8.dp))
+                Text("Editor Diagnostics", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                // Section: Assets
+                Text("ASSETS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = VSCODE_ACCENT)
+                Spacer(Modifier.height(4.dp))
+                DiagnosticsRow(
+                    label = "editor/index.html",
+                    value = if (diagnostics.indexHtmlExists) "${diagnostics.indexHtmlBytes} B" else "NOT FOUND",
+                    isOk = diagnostics.indexHtmlExists,
+                )
+                DiagnosticsRow(
+                    label = "editor/editor.bundle.js",
+                    value = if (diagnostics.bundleJsExists) "${diagnostics.bundleJsBytes / 1024} KB (${diagnostics.bundleJsBytes} B)" else "NOT FOUND",
+                    isOk = diagnostics.bundleJsExists,
+                )
+
+                Spacer(Modifier.height(12.dp))
+                // Section: Status
+                Text("BRIDGE & STATUS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = VSCODE_ACCENT)
+                Spacer(Modifier.height(4.dp))
+                DiagnosticsRow("AndroidBridge Attached", "${diagnostics.bridgeAttached}", diagnostics.bridgeAttached)
+                DiagnosticsRow("Page Finished", "${diagnostics.pageFinished}", diagnostics.pageFinished)
+                DiagnosticsRow("Editor Ready", "${diagnostics.editorReady}", diagnostics.editorReady)
+
+                Spacer(Modifier.height(12.dp))
+                // Section: Active Tab
+                Text("ACTIVE TAB", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = VSCODE_ACCENT)
+                Spacer(Modifier.height(4.dp))
+                DiagnosticsRow("Name", diagnostics.activeTabName ?: "(None)", diagnostics.activeTabName != null)
+                DiagnosticsRow("Path", diagnostics.activeTabPath ?: "(None)", true)
+                DiagnosticsRow("Content Length", "${diagnostics.activeTabContentLength} chars", true)
+                DiagnosticsRow("Modified", "${diagnostics.isModified}", true)
+                DiagnosticsRow("Partial Load", "${diagnostics.isPartiallyLoaded}", true)
+
+                Spacer(Modifier.height(12.dp))
+                // Section: Console Logs
+                Text("RECENT LOGS (${diagnostics.logs.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = VSCODE_ACCENT)
+                Spacer(Modifier.height(4.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 160.dp)
+                        .background(Color(0xFF141414), RoundedCornerShape(4.dp))
+                        .padding(8.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    if (diagnostics.logs.isEmpty()) {
+                        Text("No logs yet", fontSize = 11.sp, color = VSCODE_TEXT_MUTED)
+                    } else {
+                        Column {
+                            diagnostics.logs.takeLast(30).forEach { logLine ->
+                                Text(
+                                    text = logLine,
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = if (logLine.contains("ERROR", ignoreCase = true) || logLine.contains("Error")) {
+                                        Color(0xFFFF6B6B)
+                                    } else {
+                                        Color(0xFFB0B0B0)
+                                    },
+                                    lineHeight = 14.sp,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(
+                    onClick = {
+                        clipboardManager.setText(AnnotatedString(diagnostics.toFormattedString()))
+                        copied = true
+                    }
+                ) {
+                    Text(if (copied) "Copied!" else "Copy Diagnostics")
+                }
+                Button(onClick = onForceReload) {
+                    Text("Force Reload")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        },
+    )
+}
+
+@Composable
+private fun DiagnosticsRow(label: String, value: String, isOk: Boolean) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(label, fontSize = 12.sp, color = VSCODE_TEXT)
+        Text(
+            value,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            color = if (isOk) PocketGreen else PocketOrange,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
 }
 
 @Composable
