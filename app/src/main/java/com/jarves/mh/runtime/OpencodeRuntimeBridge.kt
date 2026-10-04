@@ -29,6 +29,25 @@ internal sealed interface OpencodeParsedEvent {
     data class Finished(val reason: String?) : OpencodeParsedEvent
 }
 
+internal object OpencodeErrorMapper {
+    fun format(raw: String): String {
+        val lower = raw.lowercase()
+        return when {
+            "401" in lower || "unauthorized" in lower || "invalid api key" in lower || "bad key" in lower || "authentication failed" in lower ->
+                "API key was rejected by the provider. Please check your saved key."
+            "429" in lower || "rate limit" in lower || "rate_limit" in lower || "quota" in lower || "too many requests" in lower || "resource exhausted" in lower ->
+                "Rate limit reached. Please wait a moment before trying again or switch to another model."
+            "network" in lower || "enotfound" in lower || "econnrefused" in lower || "connection refused" in lower || "fetch failed" in lower || "etimedout" in lower || "dns" in lower ->
+                "Network connection failed. Please check your internet connection and retry."
+            "exec format error" in lower || "architecture" in lower ->
+                "OpenCode binary is only supported on 64-bit ARM (aarch64) devices."
+            "not installed" in lower ->
+                "OpenCode is not installed or installation failed. Please install it from Settings → Coding agent."
+            else -> raw
+        }
+    }
+}
+
 internal object OpencodeEventParser {
     fun parse(line: String): OpencodeParsedEvent? {
         val root = runCatching { JSONObject(line) }.getOrNull() ?: return null
@@ -48,9 +67,9 @@ internal object OpencodeEventParser {
                 val state = part.optJSONObject("state")
                 val status = state?.optString("status")
                 val input = state?.optJSONObject("input")
-                val detail = input?.optString("path")
-                    ?: input?.optString("command")
-                    ?: state?.optString("title")
+                val detail = input?.optString("path")?.takeIf { it.isNotBlank() }
+                    ?: input?.optString("command")?.takeIf { it.isNotBlank() }
+                    ?: state?.optString("title")?.takeIf { it.isNotBlank() }
                     ?: toolName
                 if (status == "completed") {
                     OpencodeParsedEvent.ToolCompleted(toolName, detail)
@@ -105,13 +124,23 @@ class OpencodeRuntimeBridge(
         finished.remove(sessionId)
         eventBus.emit(RuntimeEvent.SessionStarted(sessionId))
 
+        val isArm64 = android.os.Build.SUPPORTED_ABIS.any { it.contains("arm64", ignoreCase = true) || it.contains("aarch64", ignoreCase = true) }
+            || System.getProperty("os.arch").orEmpty().let { it.contains("aarch64", ignoreCase = true) || it.contains("arm64", ignoreCase = true) }
+        if (!isArm64) {
+            emitFailure(sessionId, "OpenCode binary is only supported on 64-bit ARM (aarch64) devices.")
+            return@withContext sessionId
+        }
+
         if (!installer.isAgentInstalled(com.jarves.mh.model.AgentKind.OPENCODE)) {
-            emitFailure(sessionId, "OpenCode is not installed. Open Settings → Coding agent to install it.")
+            emitFailure(sessionId, "OpenCode is not installed or installation failed. Please install it from Settings → Coding agent.")
             return@withContext sessionId
         }
 
         val secret = secretProvider(provider)?.trim().orEmpty()
-        require(secret.isNotBlank()) { "Enter an OpenCode Zen API key first" }
+        if (provider.kind == com.jarves.mh.model.ProviderKind.LLM_ROUTER && secret.isBlank()) {
+            emitFailure(sessionId, "OpenRouter requires an API key. Please add your key in Settings → Coding agent.")
+            return@withContext sessionId
+        }
 
         runCatching {
             RuntimeTaskController.stopAction = {
@@ -125,6 +154,16 @@ class OpencodeRuntimeBridge(
             val before = checkpoints.snapshot(workspace)
 
             val existingSession = sessionIdProvider(projectId)
+            val modelArg = when {
+                provider.model.isBlank() -> null
+                provider.kind == com.jarves.mh.model.ProviderKind.LLM_ROUTER -> {
+                    if (provider.model.startsWith("openrouter/")) provider.model else "openrouter/${provider.model}"
+                }
+                provider.kind == com.jarves.mh.model.ProviderKind.OPENCODE_ZEN -> {
+                    if (provider.model.startsWith("opencode/")) provider.model else "opencode/${provider.model}"
+                }
+                else -> provider.model
+            }
             val command = buildList {
                 add(RuntimeInstaller.OPENCODE_GUEST_PATH)
                 add("run")
@@ -134,18 +173,20 @@ class OpencodeRuntimeBridge(
                 if (!existingSession.isNullOrBlank()) {
                     addAll(listOf("--session", existingSession))
                 }
-                if (provider.model.isNotBlank()) {
-                    addAll(listOf("--model", provider.model))
+                if (!modelArg.isNullOrBlank()) {
+                    addAll(listOf("--model", modelArg))
                 }
                 add(prompt)
             }
 
             val environment = linkedMapOf(
-                "OPENCODE_API_KEY" to secret,
-                "OPENAI_API_KEY" to secret,
-                "OPENAI_BASE_URL" to provider.resolvedBaseUrl,
                 "TERM" to "xterm-256color",
             )
+            if (provider.kind == com.jarves.mh.model.ProviderKind.OPENCODE_ZEN && secret.isNotBlank()) {
+                environment["OPENCODE_API_KEY"] = secret
+            } else if (provider.kind == com.jarves.mh.model.ProviderKind.LLM_ROUTER && secret.isNotBlank()) {
+                environment["OPENROUTER_API_KEY"] = secret
+            }
 
             val process = installer.process(
                 installed.proot,
@@ -171,7 +212,7 @@ class OpencodeRuntimeBridge(
                     }
                     is OpencodeParsedEvent.ToolStarted -> eventBus.emit(RuntimeEvent.ToolStarted(sessionId, event.name, event.detail))
                     is OpencodeParsedEvent.ToolCompleted -> eventBus.emit(RuntimeEvent.ToolCompleted(sessionId, event.name, event.detail))
-                    is OpencodeParsedEvent.Error -> throw OpencodeSessionException(event.message)
+                    is OpencodeParsedEvent.Error -> throw OpencodeSessionException(OpencodeErrorMapper.format(event.message))
                     is OpencodeParsedEvent.Finished -> Unit
                     null -> Unit
                 }
@@ -209,7 +250,8 @@ class OpencodeRuntimeBridge(
             }
             if (exitCode != 0) {
                 val tail = pending.toString().takeLast(500)
-                throw OpencodeSessionException(if (tail.isNotBlank()) tail else "OpenCode exited with code $exitCode")
+                val rawMsg = if (tail.isNotBlank()) tail else "OpenCode exited with code $exitCode"
+                throw OpencodeSessionException(OpencodeErrorMapper.format(rawMsg))
             }
 
             val paths = checkpoints.changedFiles(workspace, before)
@@ -224,8 +266,9 @@ class OpencodeRuntimeBridge(
                 cancelForegroundRuntime()
                 emitCompleted(sessionId)
             } else {
-                finishForegroundRuntime(false, projectSlug, ex.message ?: "OpenCode failed")
-                emitFailure(sessionId, ex.message ?: "OpenCode failed")
+                val mapped = OpencodeErrorMapper.format(ex.message ?: "OpenCode failed")
+                finishForegroundRuntime(false, projectSlug, mapped)
+                emitFailure(sessionId, mapped)
             }
         }
         sessionId
@@ -330,6 +373,56 @@ class OpencodeRuntimeBridge(
                     .setAction(RuntimeExecutionService.ACTION_CANCELLED),
             )
         }.onFailure { context.stopService(android.content.Intent(context, RuntimeExecutionService::class.java)) }
+    }
+
+    suspend fun discoverModels(): List<com.jarves.mh.network.DiscoveredModel> = withContext(Dispatchers.IO) {
+        if (!installer.isAgentInstalled(com.jarves.mh.model.AgentKind.OPENCODE)) {
+            return@withContext fallbackZenModels()
+        }
+        runCatching {
+            val installed = installer.installedRuntime()
+            val workspace = File(installed.rootfs, "root")
+            val process = installer.process(
+                installed.proot,
+                installed.rootfs,
+                workspace,
+                linkedMapOf("TERM" to "xterm-256color"),
+                listOf(RuntimeInstaller.OPENCODE_GUEST_PATH, "models"),
+            )
+            val output = (process as? NativeSpawnProcess)?.outputFile?.readText().orEmpty()
+            process.waitFor()
+            val lines = output.lines()
+                .map { it.trim() }
+                .filter { it.isNotBlank() && !it.startsWith("No authenticated") && !it.startsWith("┌") && !it.startsWith("│") && !it.startsWith("└") && !it.startsWith("■") }
+            if (lines.isNotEmpty()) {
+                lines.map { modelId ->
+                    val cleanName = modelId.removePrefix("opencode/")
+                        .replace("-", " ")
+                        .split(" ")
+                        .joinToString(" ") { word -> word.replaceFirstChar { it.uppercase() } }
+                    com.jarves.mh.network.DiscoveredModel(
+                        id = modelId,
+                        displayName = cleanName,
+                        isFree = modelId.endsWith("-free"),
+                    )
+                }
+            } else {
+                fallbackZenModels()
+            }
+        }.getOrElse { fallbackZenModels() }
+    }
+
+    companion object {
+        fun fallbackZenModels(): List<com.jarves.mh.network.DiscoveredModel> = listOf(
+            com.jarves.mh.network.DiscoveredModel("opencode/ling-3.0-flash-fin-free", "Ling 3.0 Flash Fin (Free)", isFree = true),
+            com.jarves.mh.network.DiscoveredModel("opencode/nemotron-3.5-lightning-free", "Nemotron 3.5 Lightning (Free)", isFree = true),
+            com.jarves.mh.network.DiscoveredModel("opencode/nemotron-3-ultra-free", "Nemotron 3 Ultra (Free)", isFree = true),
+            com.jarves.mh.network.DiscoveredModel("opencode/mimo-v2.6-flash-free", "Mimo v2.6 Flash (Free)", isFree = true),
+            com.jarves.mh.network.DiscoveredModel("opencode/longcat-2.5-preview-free", "Longcat 2.5 Preview (Free)", isFree = true),
+            com.jarves.mh.network.DiscoveredModel("opencode/muse-spark-1.3-contributor-free", "Muse Spark 1.3 (Free)", isFree = true),
+            com.jarves.mh.network.DiscoveredModel("opencode/space-bunny-free", "Space Bunny (Free)", isFree = true),
+            com.jarves.mh.network.DiscoveredModel("opencode/big-pickle", "Big Pickle (Free)", isFree = true),
+        )
     }
 
     private class OpencodeSessionException(message: String) : IllegalStateException(message)

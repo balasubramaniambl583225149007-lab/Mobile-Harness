@@ -28,7 +28,7 @@ enum class ProviderKind(
         "Models through the OpenCode Zen gateway",
         ProviderProtocol.OPENAI_RESPONSES,
         "https://opencode.ai/zen/v1",
-        "deepseek-v4-flash",
+        "opencode/ling-3.0-flash-fin-free",
         fixedBaseUrl = true,
         fixedProtocol = true,
     ),
@@ -151,7 +151,7 @@ fun providersForAgent(agent: AgentKind): List<ProviderKind> = when (agent) {
     AgentKind.DEEPSEEK_HARNESS -> ProviderKind.entries.filter { it in DEEPSEEK_HARNESS_PROVIDERS }
     AgentKind.CLAUDE_CODE -> ProviderKind.entries.filterNot { it == ProviderKind.OPENCODE_ZEN }
     AgentKind.ANTIGRAVITY -> emptyList()
-    AgentKind.OPENCODE -> listOf(ProviderKind.OPENCODE_ZEN)
+    AgentKind.OPENCODE -> listOf(ProviderKind.OPENCODE_ZEN, ProviderKind.LLM_ROUTER)
 }
 
 data class ProviderProfile(

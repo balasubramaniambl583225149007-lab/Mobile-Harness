@@ -1090,13 +1090,17 @@ fun AgentScreen(
                                     openRouterProviderOrder = openRouterProviderOrder,
                                     openRouterAllowFallbacks = openRouterAllowFallbacks,
                                 )
-                                if (kind == ProviderKind.CLAUDE) {
+                                if (kind == ProviderKind.CLAUDE || kind == ProviderKind.OPENCODE_ZEN) {
                                     onSaveProvider(profile, apiKey.trim())
-                                    status = "Claude subscription token saved securely. Send a message to verify your subscription."
+                                    status = if (kind == ProviderKind.CLAUDE) {
+                                        "Claude subscription token saved securely. Send a message to verify your subscription."
+                                    } else {
+                                        "OpenCode Zen settings saved. Ready to run with built-in CLI access."
+                                    }
                                     statusOk = true
                                     activeKeyId?.let {
                                         keyConnectionStatuses = keyConnectionStatuses +
-                                            (it to KeyConnectionStatus("Subscription token saved", true, label = "Saved"))
+                                            (it to KeyConnectionStatus(if (kind == ProviderKind.CLAUDE) "Subscription token saved" else "Settings saved", true, label = "Ready"))
                                     }
                                 } else when (val result = onValidateProvider(profile, apiKey.trim(), models)) {
                                     is ConnectionValidation.Success -> {
@@ -1735,7 +1739,7 @@ private fun AgentProviderCard(
                 icon = Icons.Default.Key,
                 title = if (selectedKind == ProviderKind.CLAUDE) "Subscription token" else "Credentials",
                 subtitle = buildString {
-                    append(activeKey?.name ?: if (selectedKind == ProviderKind.CLAUDE) "No subscription token saved" else "No API key saved")
+                    append(activeKey?.name ?: if (selectedKind == ProviderKind.CLAUDE) "No subscription token saved" else if (selectedKind == ProviderKind.OPENCODE_ZEN) "Free tier (no key required)" else "No API key saved")
                     if (activeKey != null) append(" · Active")
                     activeKeyStatus?.let {
                         append(" · ")
@@ -1862,8 +1866,8 @@ private fun AgentProviderCard(
             Spacer(Modifier.height(12.dp))
             OutlinedButton(
                 onClick = onValidate,
-                enabled = apiKey.isNotBlank() && !isDiscovering && !isValidating &&
-                    (selectedKind == ProviderKind.CLAUDE || (baseUrl.isNotBlank() && model.isNotBlank())),
+                enabled = (apiKey.isNotBlank() || selectedKind == ProviderKind.OPENCODE_ZEN) && !isDiscovering && !isValidating &&
+                    (selectedKind == ProviderKind.CLAUDE || selectedKind == ProviderKind.OPENCODE_ZEN || (baseUrl.isNotBlank() && model.isNotBlank())),
                 modifier = Modifier.fillMaxWidth().height(46.dp),
                 shape = RoundedCornerShape(13.dp),
                 border = BorderStroke(1.dp, PocketOrange.copy(alpha = 0.7f)),
@@ -1872,14 +1876,16 @@ private fun AgentProviderCard(
                     CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.8.dp, color = PocketOrange)
                     Spacer(Modifier.width(8.dp))
                 } else {
-                    Icon(if (selectedKind == ProviderKind.CLAUDE) Icons.Default.Check else Icons.Default.Refresh, null, Modifier.size(16.dp), tint = PocketOrange)
+                    Icon(if (selectedKind == ProviderKind.CLAUDE || selectedKind == ProviderKind.OPENCODE_ZEN) Icons.Default.Check else Icons.Default.Refresh, null, Modifier.size(16.dp), tint = PocketOrange)
                     Spacer(Modifier.width(8.dp))
                 }
                 Text(
                     when {
                         isValidating && selectedKind == ProviderKind.CLAUDE -> "Saving token…"
+                        isValidating && selectedKind == ProviderKind.OPENCODE_ZEN -> "Saving settings…"
                         isValidating -> "Testing connection…"
                         selectedKind == ProviderKind.CLAUDE -> "Save subscription token"
+                        selectedKind == ProviderKind.OPENCODE_ZEN -> "Save OpenCode settings"
                         else -> "Test connection"
                     },
                     color = PocketOrange,
@@ -2064,7 +2070,14 @@ private fun defaultModelsForProvider(kind: ProviderKind): List<DiscoveredModel> 
         DiscoveredModel("deepseek-v4-flash", "DeepSeek-V4 Flash"),
     )
     ProviderKind.OPENCODE_ZEN -> listOf(
-        DiscoveredModel(ProviderKind.OPENCODE_ZEN.defaultModel, "OpenCode Zen default"),
+        DiscoveredModel("opencode/ling-3.0-flash-fin-free", "Ling 3.0 Flash Fin (Free)", isFree = true),
+        DiscoveredModel("opencode/nemotron-3.5-lightning-free", "Nemotron 3.5 Lightning (Free)", isFree = true),
+        DiscoveredModel("opencode/nemotron-3-ultra-free", "Nemotron 3 Ultra (Free)", isFree = true),
+        DiscoveredModel("opencode/mimo-v2.6-flash-free", "Mimo v2.6 Flash (Free)", isFree = true),
+        DiscoveredModel("opencode/longcat-2.5-preview-free", "Longcat 2.5 Preview (Free)", isFree = true),
+        DiscoveredModel("opencode/muse-spark-1.3-contributor-free", "Muse Spark 1.3 (Free)", isFree = true),
+        DiscoveredModel("opencode/space-bunny-free", "Space Bunny (Free)", isFree = true),
+        DiscoveredModel("opencode/big-pickle", "Big Pickle (Free)", isFree = true),
     )
     ProviderKind.NVIDIA_NIM -> listOf(
         DiscoveredModel(ProviderKind.NVIDIA_NIM.defaultModel, "Qwen 2.5 Coder 32B"),
@@ -2075,6 +2088,11 @@ private fun defaultModelsForProvider(kind: ProviderKind): List<DiscoveredModel> 
         DiscoveredModel("claude-3-5-haiku-20241022", "Claude 3.5 Haiku"),
     )
     ProviderKind.LLM_ROUTER -> listOf(
+        DiscoveredModel("deepseek/deepseek-r1:free", "DeepSeek R1 (Free)", isFree = true),
+        DiscoveredModel("meta-llama/llama-3.3-70b-instruct:free", "Llama 3.3 70B (Free)", isFree = true),
+        DiscoveredModel("google/gemini-2.0-flash-exp:free", "Gemini 2.0 Flash Exp (Free)", isFree = true),
+        DiscoveredModel("mistralai/mistral-small-24b-instruct-2501:free", "Mistral Small 24B (Free)", isFree = true),
+        DiscoveredModel("qwen/qwen-2.5-coder-32b-instruct:free", "Qwen 2.5 Coder 32B (Free)", isFree = true),
         DiscoveredModel("deepseek/deepseek-r1", "DeepSeek R1 (via OpenRouter)"),
         DiscoveredModel("anthropic/claude-3.7-sonnet", "Claude 3.7 Sonnet"),
         DiscoveredModel("openai/gpt-4o", "GPT-4o"),

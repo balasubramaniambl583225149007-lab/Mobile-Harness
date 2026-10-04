@@ -1796,6 +1796,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     suspend fun discoverModels(profile: ProviderProfile, secret: String): ModelDiscoveryResult {
+        if (_state.value.agentKind == AgentKind.OPENCODE && profile.kind == ProviderKind.OPENCODE_ZEN) {
+            val models = opencodeRuntime.discoverModels()
+            return ModelDiscoveryResult.Success(models, "opencode models")
+        }
         val key = secret.ifBlank { vault.get(profile.kind.name).orEmpty() }
         return providerApi.discoverModels(profile.baseUrl, key, providerProtocolForAgent(profile, _state.value.agentKind))
     }
@@ -1805,6 +1809,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         secret: String,
         models: List<com.jarves.mh.network.DiscoveredModel>,
     ): ConnectionValidation {
+        if (_state.value.agentKind == AgentKind.OPENCODE && profile.kind == ProviderKind.OPENCODE_ZEN) {
+            return ConnectionValidation.Success("OpenCode Zen uses built-in CLI access. Settings are ready.")
+        }
         val key = secret.ifBlank { vault.get(profile.kind.name).orEmpty() }
         return providerApi.validate(
             profile.baseUrl,
@@ -1823,6 +1830,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val profile = _state.value.provider
+        if (_state.value.agentKind == AgentKind.OPENCODE && profile.kind == ProviderKind.OPENCODE_ZEN) {
+            val isInstalled = installer.isAgentInstalled(AgentKind.OPENCODE)
+            _state.update {
+                it.copy(
+                    apiPingStatus = if (isInstalled) ApiPingStatus.OK else ApiPingStatus.FAILED,
+                    apiPingMessage = if (isInstalled) "OpenCode CLI is installed and ready" else "OpenCode is not installed",
+                )
+            }
+            return
+        }
         if (profile.baseUrl.isBlank() || profile.model.isBlank()) return
         if (_state.value.apiPingStatus == ApiPingStatus.PINGING) return
         _state.update { it.copy(apiPingStatus = ApiPingStatus.PINGING, apiPingMessage = "Sending a minimal test request…") }
