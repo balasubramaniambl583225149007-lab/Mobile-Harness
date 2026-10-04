@@ -89,15 +89,25 @@ class ProviderApiClient {
         when {
             response.code in 200..299 -> ConnectionValidation.Success(
                 if (protocol == ProviderProtocol.ANTHROPIC || protocol == ProviderProtocol.ANTHROPIC_GATEWAY || protocol == ProviderProtocol.OPENROUTER) {
-                    "Anthropic Messages endpoint verified. Claude Code settings are ready."
+                    "Anthropic Messages endpoint verified. Settings are ready."
                 } else {
-                    "Connection successful. Claude Code settings are ready."
+                    "Connection successful. Settings are ready."
                 },
             )
             response.code == 401 || response.code == 403 -> ConnectionValidation.Failure(
-                "Check this API key or select another saved key.",
+                "The provider rejected the saved API key. Please check or re-enter your key.",
                 providerErrorMessage(response.body),
-                "Rejected",
+                "Key rejected",
+            )
+            response.code == 402 -> ConnectionValidation.Failure(
+                "Insufficient credits. Use a :free model or add credits to your account.",
+                providerErrorMessage(response.body),
+                "No credits",
+            )
+            response.code == 429 -> ConnectionValidation.Failure(
+                "The provider rate limit was reached. Please wait a moment before trying again.",
+                providerErrorMessage(response.body),
+                "Rate limited",
             )
             response.code == 404 -> ConnectionValidation.Failure(
                 "Check the Base URL and selected gateway protocol.",
@@ -110,11 +120,6 @@ class ProviderApiClient {
                     providerErrorMessage(response.body),
                     "Model error",
                 )
-            response.code == 429 -> ConnectionValidation.Failure(
-                "Wait a moment, then retry or use another API key.",
-                providerErrorMessage(response.body),
-                "Rate limited",
-            )
             response.code in 500..599 -> ConnectionValidation.Failure(
                 "The provider is temporarily unavailable. Try again shortly.",
                 providerErrorMessage(response.body),
@@ -127,16 +132,52 @@ class ProviderApiClient {
             )
             response.error?.contains("timeout", ignoreCase = true) == true ||
                 response.error?.contains("timed out", ignoreCase = true) == true ->
-                ConnectionValidation.Failure("Check your connection and try again.", response.error, "Timed out")
+                ConnectionValidation.Failure(
+                    "Network connection problem. Please check your internet connection.",
+                    response.error,
+                    "Timed out",
+                )
             else -> ConnectionValidation.Failure(
-                "Check your internet connection and provider settings.",
+                "Network connection problem. Please check your internet connection.",
                 response.error,
                 "Network error",
             )
         }
     }
 
-    private fun request(
+    private suspend fun request(
+        endpoint: String,
+        method: String,
+        apiKey: String,
+        body: String? = null,
+        protocol: ProviderProtocol,
+        connectTimeoutMs: Int = 12_000,
+        readTimeoutMs: Int = 20_000,
+        maxRetries: Int = 3,
+    ): HttpResult {
+        var attempt = 0
+        var backoffMs = 1000L
+        while (true) {
+            attempt++
+            val result = executeSingleRequest(
+                endpoint = endpoint,
+                method = method,
+                apiKey = apiKey,
+                body = body,
+                protocol = protocol,
+                connectTimeoutMs = connectTimeoutMs,
+                readTimeoutMs = readTimeoutMs,
+            )
+            if (result.code == 429 && attempt <= maxRetries) {
+                kotlinx.coroutines.delay(backoffMs)
+                backoffMs *= 2
+                continue
+            }
+            return result
+        }
+    }
+
+    private fun executeSingleRequest(
         endpoint: String,
         method: String,
         apiKey: String,
@@ -153,11 +194,15 @@ class ProviderApiClient {
                 setRequestProperty("Accept", "application/json")
                 setRequestProperty("Content-Type", "application/json")
                 if (apiKey.isNotBlank()) {
-                    setRequestProperty("Authorization", "Bearer $apiKey")
-                }
-                if (apiKey.isNotBlank() && protocol != ProviderProtocol.OPENROUTER && protocol != ProviderProtocol.OPENAI_CHAT && protocol != ProviderProtocol.OPENAI_RESPONSES) {
-                    setRequestProperty("x-api-key", apiKey)
-                    setRequestProperty("anthropic-version", "2023-06-01")
+                    if (protocol != ProviderProtocol.ANTHROPIC) {
+                        setRequestProperty("Authorization", "Bearer $apiKey")
+                    }
+                    if (protocol == ProviderProtocol.ANTHROPIC || protocol == ProviderProtocol.ANTHROPIC_GATEWAY) {
+                        setRequestProperty("x-api-key", apiKey)
+                    }
+                    if (protocol == ProviderProtocol.ANTHROPIC || protocol == ProviderProtocol.ANTHROPIC_GATEWAY || protocol == ProviderProtocol.OPENROUTER) {
+                        setRequestProperty("anthropic-version", "2023-06-01")
+                    }
                 }
                 if (body != null) doOutput = true
             }
@@ -167,7 +212,7 @@ class ProviderApiClient {
             val responseBody = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
             connection.disconnect()
             HttpResult(code, responseBody)
-        }.getOrElse { HttpResult(0, "", it.message ?: "Network connection failed",) }
+        }.getOrElse { HttpResult(0, "", it.message ?: "Network connection failed") }
     }
 
     private fun modelEndpoints(baseUrl: String, protocol: ProviderProtocol): List<String> {
@@ -181,12 +226,18 @@ class ProviderApiClient {
         return candidates.distinct()
     }
 
-    private fun messagesEndpoint(baseUrl: String, protocol: ProviderProtocol): String {
+    internal fun messagesEndpoint(baseUrl: String, protocol: ProviderProtocol): String {
         val base = baseUrl.trim().trimEnd('/')
         return when (protocol) {
-            ProviderProtocol.OPENROUTER -> "$base/v1/messages"
-            ProviderProtocol.OPENAI_CHAT -> "$base/chat/completions"
-            ProviderProtocol.OPENAI_RESPONSES -> "$base/responses"
+            ProviderProtocol.OPENROUTER -> if (base.endsWith("/v1")) "$base/messages" else "$base/v1/messages"
+            ProviderProtocol.OPENAI_CHAT -> when {
+                base.endsWith("/chat/completions") -> base
+                else -> "$base/chat/completions"
+            }
+            ProviderProtocol.OPENAI_RESPONSES -> when {
+                base.endsWith("/responses") -> base
+                else -> "$base/responses"
+            }
             else -> if (base.endsWith("/v1")) "$base/messages" else "$base/v1/messages"
         }
     }

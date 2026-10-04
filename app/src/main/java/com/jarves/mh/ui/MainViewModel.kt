@@ -33,6 +33,7 @@ import com.jarves.mh.model.WorkspaceEntry
 import com.jarves.mh.model.projectSlug
 import com.jarves.mh.model.generateQuickChatIdentity
 import com.jarves.mh.model.providerProtocolForAgent
+import com.jarves.mh.model.providerBaseUrlForAgent
 import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.ModelDiscoveryResult
 import com.jarves.mh.network.ProviderApiClient
@@ -1800,8 +1801,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val models = opencodeRuntime.discoverModels()
             return ModelDiscoveryResult.Success(models, "opencode models")
         }
-        val key = secret.ifBlank { vault.get(profile.kind.name).orEmpty() }
-        return providerApi.discoverModels(profile.baseUrl, key, providerProtocolForAgent(profile, _state.value.agentKind))
+        val key = try {
+            val raw = secret.ifBlank { vault.get(profile.kind.name).orEmpty() }
+            com.jarves.mh.data.sanitizeApiKey(raw)
+        } catch (e: com.jarves.mh.data.KeyDecryptionException) {
+            return ModelDiscoveryResult.Failure("Saved key could not be read. Please re-enter it.")
+        }
+        val baseUrl = providerBaseUrlForAgent(profile, _state.value.agentKind)
+        val protocol = providerProtocolForAgent(profile, _state.value.agentKind)
+        return providerApi.discoverModels(baseUrl, key, protocol)
     }
 
     suspend fun validateProvider(
@@ -1812,12 +1820,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_state.value.agentKind == AgentKind.OPENCODE && profile.kind == ProviderKind.OPENCODE_ZEN) {
             return ConnectionValidation.Success("OpenCode Zen uses built-in CLI access. Settings are ready.")
         }
-        val key = secret.ifBlank { vault.get(profile.kind.name).orEmpty() }
+        val key = try {
+            val raw = secret.ifBlank { vault.get(profile.kind.name).orEmpty() }
+            com.jarves.mh.data.sanitizeApiKey(raw)
+        } catch (e: com.jarves.mh.data.KeyDecryptionException) {
+            return ConnectionValidation.Failure("Saved key could not be read. Please re-enter it.", null, "Decryption error")
+        }
+        if (key.isBlank()) {
+            return ConnectionValidation.Failure("API key cannot be empty.")
+        }
+        val baseUrl = providerBaseUrlForAgent(profile, _state.value.agentKind)
+        val protocol = providerProtocolForAgent(profile, _state.value.agentKind)
         return providerApi.validate(
-            profile.baseUrl,
+            baseUrl,
             profile.model,
             key,
-            providerProtocolForAgent(profile, _state.value.agentKind),
+            protocol,
             models,
             profile.openRouterProviderOrder,
             profile.openRouterAllowFallbacks,
@@ -1840,16 +1858,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             return
         }
-        if (profile.baseUrl.isBlank() || profile.model.isBlank()) return
+        val effectiveBaseUrl = providerBaseUrlForAgent(profile, _state.value.agentKind)
+        if (effectiveBaseUrl.isBlank() || profile.model.isBlank()) return
         if (_state.value.apiPingStatus == ApiPingStatus.PINGING) return
         _state.update { it.copy(apiPingStatus = ApiPingStatus.PINGING, apiPingMessage = "Sending a minimal test request…") }
         viewModelScope.launch {
-            val key = vault.get(profile.kind.name).orEmpty()
+            val key = try {
+                com.jarves.mh.data.sanitizeApiKey(vault.get(profile.kind.name).orEmpty())
+            } catch (e: com.jarves.mh.data.KeyDecryptionException) {
+                _state.update { it.copy(apiPingStatus = ApiPingStatus.FAILED, apiPingMessage = "Saved key could not be read. Please re-enter it.") }
+                return@launch
+            }
+            if (key.isBlank()) {
+                _state.update { it.copy(apiPingStatus = ApiPingStatus.FAILED, apiPingMessage = "No API key is saved for ${profile.kind.title}.") }
+                return@launch
+            }
+            val protocol = providerProtocolForAgent(profile, _state.value.agentKind)
             val result = providerApi.validate(
-                profile.baseUrl,
+                effectiveBaseUrl,
                 profile.model,
                 key,
-                providerProtocolForAgent(profile, _state.value.agentKind),
+                protocol,
                 emptyList(),
                 profile.openRouterProviderOrder,
                 profile.openRouterAllowFallbacks,

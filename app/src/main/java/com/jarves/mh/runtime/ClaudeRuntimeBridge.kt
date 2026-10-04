@@ -13,6 +13,8 @@ import com.jarves.mh.model.ProviderProfile
 import com.jarves.mh.model.RiskLevel
 import com.jarves.mh.model.RuntimeEvent
 import com.jarves.mh.model.ToolRequest
+import com.jarves.mh.data.KeyDecryptionException
+import com.jarves.mh.data.sanitizeApiKey
 import java.io.File
 import java.io.RandomAccessFile
 import java.security.MessageDigest
@@ -49,17 +51,25 @@ internal object ProviderRuntimeErrorDetector {
             "resourceexhausted" in combined || "resource_exhausted" in combined || "16/16" in combined ->
                 "NVIDIA NIM concurrency limit reached (ResourceExhausted 16/16)."
             "user not found" in combined -> "User not found. Check the API key and provider account."
+            "saved key could not be read" in combined ->
+                "Saved key could not be read. Please re-enter it."
+            "402" in combined || "insufficient credits" in combined || "credit balance" in combined || "out of credits" in combined ->
+                "Insufficient credits. Use a :free model or add credits to your account."
+            "429" in combined || "rate limit" in combined || "too many requests" in combined ->
+                "The provider rate limit was reached. Please wait a moment before trying again."
             "authentication_failed" in combined ||
                 "authentication failed" in combined ||
                 "invalid api key" in combined ||
                 "http 401" in combined ||
                 "http 403" in combined ||
-                "http 429" in combined ||
+                "401 unauthorized" in combined ||
+                "403 forbidden" in combined ||
+                "invalid_api_key" in combined ||
                 "expired" in combined ||
-                "quota" in combined ||
-                "rate limit" in combined ||
-                (json?.optString("subtype") == "api_retry" && json.optInt("error_status") in listOf(401, 403, 429)) ->
+                (json?.optString("subtype") == "api_retry" && json.optInt("error_status") in listOf(401, 403)) ->
                 "The provider rejected the saved API key."
+            "enotfound" in combined || "econnrefused" in combined || "etimedout" in combined || "network error" in combined || "fetch failed" in combined ->
+                "Network connection problem. Please check your internet connection."
             else -> null
         }
     }
@@ -109,7 +119,12 @@ class ClaudeRuntimeBridge(
         streamedThinking.clear()
         eventBus.emit(RuntimeEvent.SessionStarted(sessionId))
         pushForegroundProgress("Starting Claude Code…")
-        val secret = secretFor(provider).orEmpty()
+        val secret = try {
+            secretFor(provider)?.let { sanitizeApiKey(it) }.orEmpty()
+        } catch (e: KeyDecryptionException) {
+            eventBus.emit(RuntimeEvent.SessionFailed(sessionId, "Saved key could not be read. Please re-enter it."))
+            return@withContext sessionId
+        }
         if (secret.isBlank()) {
             val message = if (provider.kind == ProviderKind.CLAUDE) {
                 "No Claude subscription token is saved. Add one from Agent → AI provider."

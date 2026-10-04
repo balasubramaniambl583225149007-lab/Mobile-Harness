@@ -133,17 +133,66 @@ fun inferredDshApiForUrl(baseUrl: String): String {
     }
 }
 
-/** Resolves the protocol DeepSeek Harness will actually use for this saved profile. */
-fun providerProtocolForAgent(profile: ProviderProfile, agent: AgentKind): ProviderProtocol {
-    if (agent != AgentKind.DEEPSEEK_HARNESS || profile.kind !in DSH_PROTOCOL_PROVIDERS) {
-        return profile.kind.protocol
+/** Resolves the protocol the selected agent will actually use for this saved profile. */
+fun providerProtocolForAgent(profile: ProviderProfile, agent: AgentKind): ProviderProtocol = when (agent) {
+    AgentKind.DEEPSEEK_HARNESS -> when (profile.kind) {
+        ProviderKind.DEEPSEEK -> ProviderProtocol.OPENAI_CHAT
+        ProviderKind.LLM_ROUTER -> ProviderProtocol.OPENAI_CHAT
+        ProviderKind.ANTHROPIC -> ProviderProtocol.ANTHROPIC
+        ProviderKind.NVIDIA_NIM -> ProviderProtocol.OPENAI_CHAT
+        ProviderKind.KIMI, ProviderKind.CUSTOM -> {
+            val api = if (profile.kind.fixedProtocol) defaultDshApiForProvider(profile.kind) else profile.dshApi
+            when (api) {
+                "openai-completions" -> ProviderProtocol.OPENAI_CHAT
+                "openai-responses" -> ProviderProtocol.OPENAI_RESPONSES
+                else -> ProviderProtocol.ANTHROPIC_GATEWAY
+            }
+        }
+        else -> profile.kind.protocol
     }
-    val api = if (profile.kind.fixedProtocol) defaultDshApiForProvider(profile.kind) else profile.dshApi
-    return when (api) {
-        "openai-completions" -> ProviderProtocol.OPENAI_CHAT
-        "openai-responses" -> ProviderProtocol.OPENAI_RESPONSES
-        else -> ProviderProtocol.ANTHROPIC_GATEWAY
+    AgentKind.OPENCODE -> when (profile.kind) {
+        ProviderKind.LLM_ROUTER -> ProviderProtocol.OPENAI_CHAT
+        ProviderKind.OPENCODE_ZEN -> ProviderProtocol.OPENAI_RESPONSES
+        else -> profile.kind.protocol
     }
+    else -> profile.kind.protocol
+}
+
+/** Resolves the base URL the selected agent will actually connect to. */
+fun providerBaseUrlForAgent(profile: ProviderProfile, agent: AgentKind): String = when (agent) {
+    AgentKind.DEEPSEEK_HARNESS -> when (profile.kind) {
+        ProviderKind.DEEPSEEK -> "https://api.deepseek.com"
+        ProviderKind.LLM_ROUTER -> "https://openrouter.ai/api/v1"
+        ProviderKind.ANTHROPIC -> profile.baseUrl.ifBlank { "https://api.anthropic.com" }
+        ProviderKind.NVIDIA_NIM -> profile.baseUrl.ifBlank { "https://integrate.api.nvidia.com/v1" }
+        ProviderKind.CUSTOM -> {
+            val cleanUrl = normalizeBaseUrl(profile.baseUrl)
+            when (profile.dshApi) {
+                "openai-completions", "openai-responses" -> if (cleanUrl.endsWith("/v1")) cleanUrl else "$cleanUrl/v1"
+                "anthropic-messages" -> cleanUrl.removeSuffix("/v1")
+                else -> cleanUrl
+            }
+        }
+        else -> profile.baseUrl
+    }
+    AgentKind.OPENCODE -> when (profile.kind) {
+        ProviderKind.LLM_ROUTER -> "https://openrouter.ai/api/v1"
+        else -> profile.baseUrl
+    }
+    AgentKind.CLAUDE_CODE -> when (profile.kind) {
+        ProviderKind.LLM_ROUTER -> {
+            val clean = normalizeBaseUrl(profile.baseUrl)
+            when {
+                clean.endsWith("/api/v1") -> clean.removeSuffix("/v1")
+                clean.endsWith("/v1") -> clean.removeSuffix("/v1") + "/api"
+                clean == "https://openrouter.ai" || clean == "http://openrouter.ai" -> "$clean/api"
+                clean.isBlank() -> "https://openrouter.ai/api"
+                else -> clean
+            }
+        }
+        else -> profile.baseUrl
+    }
+    else -> profile.baseUrl
 }
 
 /** Provider choices shown for the selected coding agent. */

@@ -13,32 +13,49 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
+fun sanitizeApiKey(key: String?): String {
+    if (key == null) return ""
+    var sanitized = key.trim().trim('\r', '\n')
+    while ((sanitized.startsWith("\"") && sanitized.endsWith("\"") && sanitized.length >= 2) ||
+           (sanitized.startsWith("'") && sanitized.endsWith("'") && sanitized.length >= 2)) {
+        sanitized = sanitized.substring(1, sanitized.length - 1).trim().trim('\r', '\n')
+    }
+    return sanitized
+}
+
+class KeyDecryptionException(
+    message: String = "Saved key could not be read. Please re-enter it.",
+    cause: Throwable? = null,
+) : RuntimeException(message, cause)
+
 class ApiKeyVault(context: Context) {
     private val preferences = context.getSharedPreferences("pocket_secrets", Context.MODE_PRIVATE)
     private val alias = "pocket-provider-key"
 
     @Synchronized
     fun put(providerId: String, secret: String) {
-        if (secret.isBlank()) return
+        val sanitized = sanitizeApiKey(secret)
+        require(sanitized.isNotBlank()) { "API key cannot be empty" }
         val entries = ensurePool(providerId)
         val active = entries.firstOrNull { it.id == activeId(providerId) } ?: entries.firstOrNull()
         if (active == null) {
-            add(providerId, "Primary", secret)
+            add(providerId, "Primary", sanitized)
         } else {
-            putEncrypted(secretKey(providerId, active.id), secret)
+            putEncrypted(secretKey(providerId, active.id), sanitized)
         }
     }
 
     @Synchronized
     fun add(providerId: String, name: String, secret: String): ApiKeyInfo {
-        require(secret.isNotBlank()) { "API key cannot be empty" }
+        val sanitized = sanitizeApiKey(secret)
+        require(sanitized.isNotBlank()) { "API key cannot be empty" }
         val entries = ensurePool(providerId).toMutableList()
         val entry = ApiKeyInfo(
             id = UUID.randomUUID().toString(),
             name = name.trim().ifBlank { "API key ${entries.size + 1}" }.take(60),
             isActive = entries.isEmpty(),
         )
-        putEncrypted(secretKey(providerId, entry.id), secret)
+        putEncrypted(secretKey(providerId, entry.id), sanitized)
         entries += entry.copy(isActive = false)
         savePool(providerId, entries)
         if (entries.size == 1) setActiveId(providerId, entry.id)
@@ -54,9 +71,16 @@ class ApiKeyVault(context: Context) {
 
     @Synchronized
     fun credentials(providerId: String): List<ApiKeyCredential> = list(providerId).mapNotNull { info ->
-        getEncrypted(secretKey(providerId, info.id))?.let { secret ->
-            ApiKeyCredential(info.id, info.name, secret, info.isActive)
-        }
+        runCatching {
+            getEncrypted(secretKey(providerId, info.id))?.let { secret ->
+                val sanitized = sanitizeApiKey(secret)
+                if (sanitized.isNotBlank()) {
+                    ApiKeyCredential(info.id, info.name, sanitized, info.isActive)
+                } else {
+                    null
+                }
+            }
+        }.getOrNull()
     }.sortedByDescending(ApiKeyCredential::isActive)
 
     @Synchronized
@@ -87,7 +111,7 @@ class ApiKeyVault(context: Context) {
             .apply()
     }
 
-    fun contains(providerId: String): Boolean = get(providerId) != null
+    fun contains(providerId: String): Boolean = runCatching { get(providerId) != null }.getOrDefault(false)
 
     @Synchronized
     fun remove(providerId: String) {
@@ -103,16 +127,36 @@ class ApiKeyVault(context: Context) {
     @Synchronized
     fun get(providerId: String): String? {
         val active = list(providerId).firstOrNull { it.isActive } ?: return null
-        return getEncrypted(secretKey(providerId, active.id))
+        val decrypted = getEncrypted(secretKey(providerId, active.id)) ?: return null
+        val sanitized = sanitizeApiKey(decrypted)
+        if (sanitized.isBlank()) {
+            throw KeyDecryptionException("Saved key could not be read. Please re-enter it.")
+        }
+        return sanitized
     }
 
-    private fun getEncrypted(storageId: String): String? = runCatching {
-        val iv = Base64.decode(preferences.getString("$storageId.iv", null), Base64.NO_WRAP)
-        val encrypted = Base64.decode(preferences.getString("$storageId.value", null), Base64.NO_WRAP)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
-        cipher.doFinal(encrypted).toString(Charsets.UTF_8)
-    }.getOrNull()
+    private fun getEncrypted(storageId: String): String? {
+        if (!preferences.contains("$storageId.value")) return null
+        val ivRaw = preferences.getString("$storageId.iv", null)
+            ?: throw KeyDecryptionException("Saved key could not be read. Please re-enter it.")
+        val valueRaw = preferences.getString("$storageId.value", null)
+            ?: throw KeyDecryptionException("Saved key could not be read. Please re-enter it.")
+        return runCatching {
+            val iv = Base64.decode(ivRaw, Base64.NO_WRAP)
+            val encrypted = Base64.decode(valueRaw, Base64.NO_WRAP)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
+            val decrypted = cipher.doFinal(encrypted).toString(Charsets.UTF_8)
+            val sanitized = sanitizeApiKey(decrypted)
+            if (sanitized.isBlank()) {
+                throw KeyDecryptionException("Saved key could not be read. Please re-enter it.")
+            }
+            sanitized
+        }.getOrElse { error ->
+            if (error is KeyDecryptionException) throw error
+            throw KeyDecryptionException("Saved key could not be read. Please re-enter it.", error)
+        }
+    }
 
     private fun removeEncrypted(storageId: String) {
         preferences.edit().remove("$storageId.iv").remove("$storageId.value").apply()
@@ -121,7 +165,7 @@ class ApiKeyVault(context: Context) {
     private fun ensurePool(providerId: String): List<ApiKeyInfo> {
         readPool(providerId).takeIf(List<ApiKeyInfo>::isNotEmpty)?.let { return it }
         if (!preferences.contains("$providerId.value")) return emptyList()
-        val legacySecret = getEncrypted(providerId) ?: return emptyList()
+        val legacySecret = runCatching { getEncrypted(providerId) }.getOrNull() ?: return emptyList()
         val legacy = ApiKeyInfo("legacy", "Primary", true)
         putEncrypted(secretKey(providerId, legacy.id), legacySecret)
         savePool(providerId, listOf(legacy))

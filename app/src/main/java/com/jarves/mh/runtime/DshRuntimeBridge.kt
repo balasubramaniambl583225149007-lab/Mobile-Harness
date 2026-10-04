@@ -11,6 +11,8 @@ import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
 import com.jarves.mh.model.RuntimeEvent
 import com.jarves.mh.model.ToolRequest
+import com.jarves.mh.data.KeyDecryptionException
+import com.jarves.mh.data.sanitizeApiKey
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.UUID
@@ -68,8 +70,12 @@ class DshRuntimeBridge(
         foregroundResultPosted = false
         lastThinkingUpdateAt = 0L
         eventBus.emit(RuntimeEvent.SessionStarted(sessionId))
-        pushForegroundProgress("Starting DeepSeek Harness…")
-        val secret = secretFor(provider).orEmpty()
+        val secret = try {
+            secretFor(provider)?.let { sanitizeApiKey(it) }.orEmpty()
+        } catch (e: KeyDecryptionException) {
+            eventBus.emit(RuntimeEvent.SessionFailed(sessionId, "Saved key could not be read. Please re-enter it."))
+            return@withContext sessionId
+        }
         if (secret.isBlank()) {
             eventBus.emit(RuntimeEvent.SessionFailed(sessionId, "No API key is saved for ${provider.kind.title}."))
             return@withContext sessionId
@@ -508,18 +514,25 @@ class DshRuntimeBridge(
 
     private fun friendlyError(error: Throwable): String {
         val message = error.message.orEmpty()
+        val lower = message.lowercase()
         return when {
             error is DshSessionException && message.isMeaningfulDshText() -> message
-            message.contains("authentication", true) ||
-                message.contains("invalid api key", true) ||
-                message.contains("autherror", true) ||
-                message.contains("expired", true) ||
-                message.contains("quota", true) ||
-                message.contains("rate limit", true) ||
-                listOf("401", "403", "429").any { code ->
-                    message.contains(code) && (message.contains("auth", true) || message.contains("HTTP", true))
+            lower.contains("saved key could not be read") ->
+                "Saved key could not be read. Please re-enter it."
+            lower.contains("402") || lower.contains("insufficient credits") || lower.contains("credit balance") || lower.contains("out of credits") ->
+                "Insufficient credits. Use a :free model or add credits to your account."
+            lower.contains("429") || lower.contains("rate limit") || lower.contains("too many requests") ->
+                "The provider rate limit was reached. Please wait a moment before trying again."
+            lower.contains("authentication") ||
+                lower.contains("invalid api key") ||
+                lower.contains("autherror") ||
+                lower.contains("expired") ||
+                listOf("401", "403").any { code ->
+                    lower.contains(code) && (lower.contains("auth") || lower.contains("http") || lower.contains("status"))
                 } ->
                 "The provider rejected the saved API key."
+            lower.contains("enotfound") || lower.contains("econnrefused") || lower.contains("etimedout") || lower.contains("network") || lower.contains("connection refused") ->
+                "Network connection problem. Please check your internet connection."
             message.contains("missing_credential", true) ->
                 "No API key reached DeepSeek Harness. Re-save the provider key in Settings."
             message.contains("not installed", true) -> message.take(300)

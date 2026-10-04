@@ -84,7 +84,11 @@ object RuntimeLaunchConfigBuilder {
             }
         }
         val runtimeModel = environment["ANTHROPIC_MODEL"] ?: profile.model
+        val cleanAuthToken = authToken?.let { com.jarves.mh.data.sanitizeApiKey(it) }?.takeIf(String::isNotBlank)
         if (profile.kind.protocol != com.jarves.mh.model.ProviderProtocol.CLAUDE_LOGIN) {
+            environment["NODE_OPTIONS"] = "--dns-result-order=ipv4first"
+            environment["CLAUDE_CODE_MAX_RETRIES"] = "3"
+            environment["ANTHROPIC_MAX_RETRIES"] = "3"
             environment["ANTHROPIC_DEFAULT_OPUS_MODEL"] = runtimeModel
             environment["ANTHROPIC_DEFAULT_SONNET_MODEL"] = runtimeModel
             environment["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = runtimeModel
@@ -95,21 +99,21 @@ object RuntimeLaunchConfigBuilder {
             environment["CLAUDE_CODE_DISABLE_TOKEN_COUNTING"] = "1"
             environment["DISABLE_TELEMETRY"] = "1"
             if (profile.kind == com.jarves.mh.model.ProviderKind.LLM_ROUTER || profile.kind.protocol == com.jarves.mh.model.ProviderProtocol.OPENROUTER) {
-                environment["ANTHROPIC_AUTH_TOKEN"] = authToken.orEmpty()
+                environment["ANTHROPIC_AUTH_TOKEN"] = cleanAuthToken.orEmpty()
                 environment["ANTHROPIC_API_KEY"] = ""
-                if (!authToken.isNullOrBlank()) {
-                    environment["OPENROUTER_API_KEY"] = authToken
+                if (!cleanAuthToken.isNullOrBlank()) {
+                    environment["OPENROUTER_API_KEY"] = cleanAuthToken
                 }
-            } else if (!authToken.isNullOrBlank()) {
-                environment["ANTHROPIC_AUTH_TOKEN"] = authToken
-                environment["ANTHROPIC_API_KEY"] = authToken
+            } else if (!cleanAuthToken.isNullOrBlank()) {
+                environment["ANTHROPIC_AUTH_TOKEN"] = cleanAuthToken
+                environment["ANTHROPIC_API_KEY"] = cleanAuthToken
             }
             if (profile.kind == com.jarves.mh.model.ProviderKind.CUSTOM) {
                 val cleanUrl = com.jarves.mh.model.normalizeBaseUrl(profile.baseUrl)
                 val openAiBase = if (cleanUrl.endsWith("/v1")) cleanUrl else "$cleanUrl/v1"
                 environment["OPENAI_API_BASE"] = openAiBase
-                if (!authToken.isNullOrBlank()) {
-                    environment["OPENAI_API_KEY"] = authToken
+                if (!cleanAuthToken.isNullOrBlank()) {
+                    environment["OPENAI_API_KEY"] = cleanAuthToken
                 }
             }
         }

@@ -8,6 +8,8 @@ import com.jarves.mh.model.ProjectKind
 import com.jarves.mh.model.ProviderProfile
 import com.jarves.mh.model.RuntimeEvent
 import com.jarves.mh.model.ToolRequest
+import com.jarves.mh.data.KeyDecryptionException
+import com.jarves.mh.data.sanitizeApiKey
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.UUID
@@ -136,7 +138,12 @@ class OpencodeRuntimeBridge(
             return@withContext sessionId
         }
 
-        val secret = secretProvider(provider)?.trim().orEmpty()
+        val secret = try {
+            secretProvider(provider)?.let { sanitizeApiKey(it) }.orEmpty()
+        } catch (e: KeyDecryptionException) {
+            emitFailure(sessionId, "Saved key could not be read. Please re-enter it.")
+            return@withContext sessionId
+        }
         if (provider.kind == com.jarves.mh.model.ProviderKind.LLM_ROUTER && secret.isBlank()) {
             emitFailure(sessionId, "OpenRouter requires an API key. Please add your key in Settings → Coding agent.")
             return@withContext sessionId
