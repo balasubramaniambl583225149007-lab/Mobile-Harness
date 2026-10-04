@@ -6,6 +6,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import android.os.SystemClock
 import android.os.Build
+import android.os.StatFs
 import android.system.Os
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -15,6 +16,7 @@ import com.jarves.mh.BuildConfig
 import com.jarves.mh.data.ApiKeyVault
 import com.jarves.mh.data.ApiKeyInfo
 import com.jarves.mh.data.AppPreferences
+import com.jarves.mh.data.FileImportHelper
 import com.jarves.mh.model.ActivityItem
 import com.jarves.mh.model.AgentKind
 import com.jarves.mh.model.ChangeItem
@@ -77,6 +79,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.isActive
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -169,6 +172,20 @@ private data class ImportedZipProject(
     val sourceAttachment: ChatAttachment,
 )
 
+data class FileOverwriteRequest(
+    val sourceUri: Uri,
+    val destinationFile: File,
+    val targetRelativePath: String,
+    val remainingUris: List<Uri>,
+    val targetDirRelative: String,
+)
+
+data class NonTextAttachmentNotice(
+    val uri: Uri,
+    val displayName: String,
+    val mimeType: String,
+)
+
 data class AppUiState(
     val startupStage: StartupStage = StartupStage.CHECKING,
     val startupProgress: Float = 0f,
@@ -189,6 +206,11 @@ data class AppUiState(
     val projects: List<Project> = emptyList(),
     val projectImporting: Boolean = false,
     val projectImportMessage: String? = null,
+    val fileImporting: Boolean = false,
+    val fileImportProgress: Float? = null,
+    val fileImportMessage: String? = null,
+    val pendingOverwriteConfirmation: FileOverwriteRequest? = null,
+    val nonTextAttachmentNotice: NonTextAttachmentNotice? = null,
     val gitCloneRunning: Boolean = false,
     val gitCloneMessage: String? = null,
     val githubAuthStatus: GitHubAuthStatus = GitHubAuthStatus.DISCONNECTED,
@@ -2285,7 +2307,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val nestedRoot = detectNestedProjectRoot(preliminary)
             val projectRoot = nestedRoot?.let { File(destination, it) } ?: destination
             val metadata = detectImportedProjectMetadata(projectRoot)
-            val safeArchiveName = sanitizeAttachmentName(archiveName).let { name ->
+            val safeArchiveName = FileImportHelper.sanitizeFileName(archiveName).let { name ->
                 if (name.endsWith(".zip", ignoreCase = true)) name else "$name.zip"
             }
             val archiveFolder = File(projectRoot, ".pocketdev/imports").apply { mkdirs() }
@@ -3503,11 +3525,271 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return relativePath.split('/').any { it in excludedNames } || isClaudeRuntimeMetadata(relativePath)
     }
 
+    private var fileImportJob: kotlinx.coroutines.Job? = null
+
+    fun cancelFileImport() {
+        fileImportJob?.cancel()
+        fileImportJob = null
+        _state.update {
+            it.copy(
+                fileImporting = false,
+                fileImportProgress = null,
+                fileImportMessage = null,
+                toastMessage = "File import cancelled",
+            )
+        }
+    }
+
+    fun dismissNonTextAttachmentNotice() {
+        _state.update { it.copy(nonTextAttachmentNotice = null) }
+    }
+
+    fun convertNonTextAttachmentToImport(notice: NonTextAttachmentNotice) {
+        dismissNonTextAttachmentNotice()
+        importFilesIntoProject(listOf(notice.uri))
+    }
+
+    fun importFilesIntoProject(
+        uris: List<Uri>,
+        targetDirRelative: String = "",
+        overwriteAll: Boolean = false,
+    ) {
+        val project = _state.value.activeProject ?: return
+        if (uris.isEmpty()) return
+        fileImportJob?.cancel()
+        fileImportJob = viewModelScope.launch {
+            _state.update {
+                it.copy(
+                    fileImporting = true,
+                    fileImportProgress = 0f,
+                    fileImportMessage = "Preparing to import ${uris.size} file(s)…",
+                    pendingOverwriteConfirmation = null,
+                )
+            }
+            val root = projectWorkspaceRoot(project).canonicalFile
+            val targetDir = if (targetDirRelative.isBlank()) root else File(root, targetDirRelative).canonicalFile
+            if (!targetDir.toPath().startsWith(root.toPath())) {
+                _state.update {
+                    it.copy(
+                        fileImporting = false,
+                        fileImportProgress = null,
+                        fileImportMessage = null,
+                        toastMessage = "Invalid import directory",
+                    )
+                }
+                return@launch
+            }
+            targetDir.mkdirs()
+
+            val resolver = getApplication<Application>().contentResolver
+
+            var totalDeclaredBytes = 0L
+            val fileMetadata = uris.map { uri ->
+                var name = "file"
+                var size = -1L
+                resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let {
+                            name = cursor.getString(it) ?: name
+                        }
+                        cursor.getColumnIndex(OpenableColumns.SIZE).takeIf { it >= 0 }?.let {
+                            size = cursor.getLong(it)
+                        }
+                    }
+                }
+                if (size > 0) totalDeclaredBytes += size
+                Triple(uri, name, size)
+            }
+
+            val stat = StatFs(root.absolutePath)
+            val availableBytes = stat.availableBytes
+            val safetyReserve = 50L * 1024L * 1024L
+            if (totalDeclaredBytes > 0 && availableBytes < (totalDeclaredBytes + safetyReserve)) {
+                _state.update {
+                    it.copy(
+                        fileImporting = false,
+                        fileImportProgress = null,
+                        fileImportMessage = null,
+                        toastMessage = "Not enough free storage space (need ${FileImportHelper.formatFileSize(totalDeclaredBytes + safetyReserve)}, available ${FileImportHelper.formatFileSize(availableBytes)})",
+                    )
+                }
+                return@launch
+            }
+
+            withContext(Dispatchers.IO) {
+                var importedCount = 0
+                var bytesCopiedSoFar = 0L
+                for ((index, item) in fileMetadata.withIndex()) {
+                    if (!this@withContext.isActive) break
+                    val (uri, rawName, declaredSize) = item
+                    val safeName = FileImportHelper.sanitizeFileName(rawName)
+                    val destFile = File(targetDir, safeName).canonicalFile
+                    if (!destFile.toPath().startsWith(root.toPath())) continue
+
+                    if (destFile.exists() && !overwriteAll) {
+                        val remaining = uris.drop(index + 1)
+                        _state.update {
+                            it.copy(
+                                fileImporting = false,
+                                pendingOverwriteConfirmation = FileOverwriteRequest(
+                                    sourceUri = uri,
+                                    destinationFile = destFile,
+                                    targetRelativePath = destFile.relativeTo(root).invariantSeparatorsPath,
+                                    remainingUris = remaining,
+                                    targetDirRelative = targetDirRelative,
+                                ),
+                            )
+                        }
+                        return@withContext
+                    }
+
+                    if (declaredSize > FileImportHelper.MAX_IMPORT_BYTES) {
+                        _state.update { it.copy(toastMessage = "$safeName exceeds 1 GB limit") }
+                        continue
+                    }
+                    if (declaredSize > FileImportHelper.LARGE_FILE_THRESHOLD_BYTES) {
+                        _state.update { it.copy(toastMessage = "Importing large file: $safeName (${FileImportHelper.formatFileSize(declaredSize)})") }
+                    }
+
+                    var fileBytesCopied = 0L
+                    try {
+                        resolver.openInputStream(uri)?.buffered()?.use { input ->
+                            destFile.outputStream().buffered().use { output ->
+                                val buffer = ByteArray(64 * 1024)
+                                while (this@withContext.isActive) {
+                                    val read = input.read(buffer)
+                                    if (read < 0) break
+                                    fileBytesCopied += read
+                                    if (fileBytesCopied > FileImportHelper.MAX_IMPORT_BYTES) {
+                                        error("$safeName exceeds 1 GB limit")
+                                    }
+                                    output.write(buffer, 0, read)
+                                    bytesCopiedSoFar += read
+                                    if (totalDeclaredBytes > 0) {
+                                        val progress = (bytesCopiedSoFar.toFloat() / totalDeclaredBytes).coerceIn(0f, 1f)
+                                        _state.update {
+                                            it.copy(
+                                                fileImportProgress = progress,
+                                                fileImportMessage = "Importing ${index + 1}/${fileMetadata.size}: $safeName (${(progress * 100).toInt()}%)",
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (this@withContext.isActive) importedCount++
+                    } catch (e: Throwable) {
+                        destFile.delete()
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        _state.update { it.copy(toastMessage = "Failed to copy $safeName: ${e.message}") }
+                    }
+                }
+
+                _state.update {
+                    it.copy(
+                        fileImporting = false,
+                        fileImportProgress = null,
+                        fileImportMessage = null,
+                        toastMessage = if (importedCount > 0) "Imported $importedCount file(s) into project" else null,
+                    )
+                }
+            }
+            refreshProjectFiles()
+        }
+    }
+
+    fun confirmFileOverwrite(request: FileOverwriteRequest, overwrite: Boolean, rename: Boolean = false) {
+        _state.update { it.copy(pendingOverwriteConfirmation = null) }
+        val project = _state.value.activeProject ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val root = projectWorkspaceRoot(project).canonicalFile
+            val targetDir = request.destinationFile.parentFile ?: root
+            val resolver = getApplication<Application>().contentResolver
+
+            if (overwrite || rename) {
+                val destFile = if (rename) {
+                    val name = request.destinationFile.name
+                    val stem = name.substringBeforeLast('.')
+                    val ext = name.substringAfterLast('.', "").let { if (it.isBlank()) "" else ".$it" }
+                    var suffix = 2
+                    var candidate = File(targetDir, "$stem-$suffix$ext")
+                    while (candidate.exists()) {
+                        suffix++
+                        candidate = File(targetDir, "$stem-$suffix$ext")
+                    }
+                    candidate
+                } else {
+                    request.destinationFile
+                }
+
+                runCatching {
+                    resolver.openInputStream(request.sourceUri)?.buffered()?.use { input ->
+                        destFile.outputStream().buffered().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                }.onSuccess {
+                    _state.update { it.copy(toastMessage = "Imported ${destFile.name}") }
+                }.onFailure {
+                    destFile.delete()
+                    _state.update { state -> state.copy(toastMessage = "Failed to copy: ${it.message}") }
+                }
+            }
+
+            refreshProjectFiles()
+
+            if (request.remainingUris.isNotEmpty()) {
+                importFilesIntoProject(
+                    request.remainingUris,
+                    targetDirRelative = request.targetDirRelative,
+                    overwriteAll = overwrite,
+                )
+            }
+        }
+    }
+
     fun addChatAttachments(uris: List<Uri>) {
         val current = _state.value
         val project = current.activeProject ?: return
         val chatId = current.activeChatId ?: return
         if (current.isRunning || uris.isEmpty()) return
+
+        val resolver = getApplication<Application>().contentResolver
+        val nonTextUris = mutableListOf<Pair<Uri, String>>()
+        val textUris = mutableListOf<Uri>()
+
+        for (uri in uris) {
+            var name = "attachment"
+            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let {
+                        name = cursor.getString(it) ?: name
+                    }
+                }
+            }
+            val mime = resolver.getType(uri)
+            if (FileImportHelper.isCommonText(name, mime)) {
+                textUris += uri
+            } else {
+                nonTextUris += uri to name
+            }
+        }
+
+        if (nonTextUris.isNotEmpty()) {
+            val (uri, name) = nonTextUris.first()
+            _state.update {
+                it.copy(
+                    nonTextAttachmentNotice = NonTextAttachmentNotice(
+                        uri = uri,
+                        displayName = name,
+                        mimeType = resolver.getType(uri).orEmpty(),
+                    ),
+                )
+            }
+        }
+
+        if (textUris.isEmpty()) return
+
         val remaining = (MAX_ATTACHMENTS_PER_MESSAGE - current.pendingAttachments.size).coerceAtLeast(0)
         if (remaining == 0) {
             _state.update { it.copy(toastMessage = "You can attach up to $MAX_ATTACHMENTS_PER_MESSAGE files per message") }
@@ -3517,7 +3799,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val result = withContext(Dispatchers.IO) {
                 val added = mutableListOf<ChatAttachment>()
                 val errors = mutableListOf<String>()
-                uris.take(remaining).forEach { uri ->
+                textUris.take(remaining).forEach { uri ->
                     runCatching { copyChatAttachment(project, chatId, uri) }
                         .onSuccess(added::add)
                         .onFailure { errors += (it.message ?: "Could not attach file") }
@@ -3528,7 +3810,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { state ->
                 state.copy(
                     pendingAttachments = state.pendingAttachments + added,
-                    toastMessage = errors.firstOrNull() ?: if (uris.size > remaining) "Only $remaining more file${if (remaining == 1) "" else "s"} could be added" else null,
+                    toastMessage = errors.firstOrNull() ?: if (textUris.size > remaining) "Only $remaining more file${if (remaining == 1) "" else "s"} could be added" else null,
                 )
             }
             if (added.isNotEmpty()) refreshProjectFiles()
@@ -3576,19 +3858,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         val mimeType = resolver.getType(uri).orEmpty().ifBlank { "application/octet-stream" }
-        val extension = displayName.substringAfterLast('.', "").lowercase()
-        val supportedTextExtensions = setOf(
-            "txt", "md", "markdown", "json", "jsonl", "csv", "tsv", "xml", "yaml", "yml", "log",
-            "kt", "kts", "java", "py", "js", "mjs", "cjs", "ts", "tsx", "jsx", "html", "htm",
-            "css", "scss", "sass", "less", "c", "cc", "cpp", "h", "hpp", "sh", "bash", "zsh",
-            "gradle", "properties", "toml", "ini", "conf", "sql",
-        )
-        val supported = mimeType.startsWith("image/") ||
-            mimeType.startsWith("text/") || mimeType == "application/json" || mimeType == "application/xml" ||
-            mimeType.endsWith("+json") || mimeType.endsWith("+xml") || extension in supportedTextExtensions
-        require(supported) { "Only images and text files are supported" }
-        require(declaredSize <= MAX_ATTACHMENT_BYTES || declaredSize < 0) { "$displayName is larger than 25 MB" }
-        val safeName = sanitizeAttachmentName(displayName)
+        require(FileImportHelper.isCommonText(displayName, mimeType)) {
+            "Non-text file. Use import into project folder instead."
+        }
+        val safeName = FileImportHelper.sanitizeFileName(displayName)
         val root = projectWorkspaceRoot(project).canonicalFile
         val folder = File(root, "attachments/$chatId").apply { mkdirs() }.canonicalFile
         require(folder.toPath().startsWith(root.toPath())) { "Unsafe attachment folder" }
@@ -3606,7 +3879,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val count = input.read(buffer)
                         if (count < 0) break
                         copied += count
-                        require(copied <= MAX_ATTACHMENT_BYTES) { "$displayName is larger than 25 MB" }
                         output.write(buffer, 0, count)
                     }
                 }
@@ -3615,17 +3887,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             destination.delete()
             throw error
         }
+
+        val isLarge = destination.length() > 50L * 1024L
+        val (snippet, wasTruncated) = runCatching {
+            val content = destination.bufferedReader().use { reader ->
+                val chars = CharArray(FileImportHelper.MAX_ATTACHMENT_CHAT_CHARS + 1)
+                val read = reader.read(chars)
+                if (read > 0) String(chars, 0, read) else ""
+            }
+            FileImportHelper.truncateText(content)
+        }.getOrDefault("" to false)
+
+        val finalTruncated = wasTruncated || isLarge
+        val truncatedContent = if (finalTruncated && snippet.isNotBlank()) {
+            "$snippet\n\n[Note: Content truncated for chat context. Full file saved at attachments.]"
+        } else {
+            snippet.takeIf { it.isNotBlank() }
+        }
+
         return ChatAttachment(
             displayName = displayName.take(120),
             relativePath = destination.relativeTo(root).invariantSeparatorsPath,
             mimeType = mimeType,
             sizeBytes = copied,
+            truncated = finalTruncated,
+            truncatedContent = truncatedContent,
         )
-    }
-
-    private fun sanitizeAttachmentName(name: String): String {
-        val clean = name.substringAfterLast('/').replace(Regex("[^A-Za-z0-9._ -]"), "_").trim().trim('.').take(100)
-        return clean.ifBlank { "attachment-${UUID.randomUUID().toString().take(8)}" }
     }
 
     fun sendPrompt(prompt: String) {
@@ -3668,6 +3955,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             appendLine("<attached_files>")
             attachments.forEach { attachment ->
                 appendLine("- ${attachment.displayName}: ${projectGuestRoot(project)}/${attachment.relativePath} (${attachment.mimeType})")
+                if (attachment.truncated && !attachment.truncatedContent.isNullOrBlank()) {
+                    appendLine("  [Preview truncated for chat context; full file at ${projectGuestRoot(project)}/${attachment.relativePath}]:")
+                    appendLine("  ```")
+                    attachment.truncatedContent.lines().forEach { line ->
+                        appendLine("  $line")
+                    }
+                    appendLine("  ```")
+                }
             }
             appendLine("These files were explicitly attached by the user. Inspect them only as needed for the request.")
             appendLine("</attached_files>")

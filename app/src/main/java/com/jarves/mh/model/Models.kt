@@ -406,6 +406,8 @@ data class ChatAttachment(
     val relativePath: String,
     val mimeType: String,
     val sizeBytes: Long,
+    val truncated: Boolean = false,
+    val truncatedContent: String? = null,
 )
 
 data class ProjectChat(

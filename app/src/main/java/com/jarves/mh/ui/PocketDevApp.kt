@@ -92,6 +92,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Key
@@ -371,6 +372,11 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onCreateWorkspaceFolder = viewModel::createWorkspaceFolder,
             onRenameWorkspaceEntry = viewModel::renameWorkspaceEntry,
             onDeleteWorkspaceEntry = viewModel::deleteWorkspaceEntry,
+            onImportFilesToProject = viewModel::importFilesIntoProject,
+            onCancelFileImport = viewModel::cancelFileImport,
+            onConfirmOverwrite = viewModel::confirmFileOverwrite,
+            onDismissNonTextNotice = viewModel::dismissNonTextAttachmentNotice,
+            onConvertNonTextToImport = viewModel::convertNonTextAttachmentToImport,
         )
         else -> RootScreenHost(state, viewModel, projectsListState)
     }
@@ -3876,6 +3882,11 @@ private fun WorkspaceScreen(
     onCreateWorkspaceFolder: (String, String) -> Unit = { _, _ -> },
     onRenameWorkspaceEntry: (String, String) -> Unit = { _, _ -> },
     onDeleteWorkspaceEntry: (String) -> Unit = {},
+    onImportFilesToProject: (List<Uri>, String) -> Unit = { _, _ -> },
+    onCancelFileImport: () -> Unit = {},
+    onConfirmOverwrite: (FileOverwriteRequest, Boolean, Boolean) -> Unit = { _, _, _ -> },
+    onDismissNonTextNotice: () -> Unit = {},
+    onConvertNonTextToImport: (NonTextAttachmentNotice) -> Unit = {},
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -3889,6 +3900,12 @@ private fun WorkspaceScreen(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
         onResult = onAddAttachments,
     )
+    var pendingImportTargetDir by rememberSaveable { mutableStateOf("") }
+    val importFilesLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        if (uris.isNotEmpty()) onImportFilesToProject(uris, pendingImportTargetDir)
+    }
     val unknownAppsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
         onResult = {
@@ -3987,6 +4004,51 @@ private fun WorkspaceScreen(
             },
             confirmButton = { Button(onClick = onTerminalConfirm) { Text("Run anyway") } },
             dismissButton = { TextButton(onClick = onTerminalCancel) { Text("Cancel") } },
+        )
+    }
+    state.pendingOverwriteConfirmation?.let { request ->
+        AlertDialog(
+            onDismissRequest = { onConfirmOverwrite(request, false, false) },
+            icon = { Icon(Icons.Default.Warning, contentDescription = null, tint = PocketOrange) },
+            title = { Text("File already exists") },
+            text = {
+                Text("“${request.destinationFile.name}” already exists in the destination folder. Do you want to replace it or keep both?")
+            },
+            confirmButton = {
+                TextButton(onClick = { onConfirmOverwrite(request, true, false) }) {
+                    Text("Replace", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { onConfirmOverwrite(request, false, true) }) {
+                        Text("Keep both")
+                    }
+                    TextButton(onClick = { onConfirmOverwrite(request, false, false) }) {
+                        Text("Cancel")
+                    }
+                }
+            },
+        )
+    }
+    state.nonTextAttachmentNotice?.let { notice ->
+        AlertDialog(
+            onDismissRequest = onDismissNonTextNotice,
+            icon = { Icon(Icons.Default.Info, contentDescription = null, tint = PocketOrange) },
+            title = { Text("Non-text file selected") },
+            text = {
+                Text("“${notice.displayName}” is a non-text or binary file and cannot be attached to chat. Would you like to import it into your project folder instead?")
+            },
+            confirmButton = {
+                Button(onClick = { onConvertNonTextToImport(notice) }) {
+                    Text("Import into project folder")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismissNonTextNotice) {
+                    Text("Cancel")
+                }
+            },
         )
     }
     Scaffold(
@@ -4090,7 +4152,7 @@ private fun WorkspaceScreen(
                         agentKind = state.agentKind,
                         pendingAttachments = state.pendingAttachments,
                         onAttach = {
-                            attachmentLauncher.launch(arrayOf("image/*", "text/*", "application/json", "application/xml"))
+                            attachmentLauncher.launch(arrayOf("*/*"))
                         },
                         onRemoveAttachment = onRemoveAttachment,
                         onOpenAttachment = onOpenAttachment,
@@ -4120,6 +4182,14 @@ private fun WorkspaceScreen(
                         onDeleteEntry = onDeleteWorkspaceEntry,
                         onRefreshFiles = onRefreshFiles,
                         onBackToChat = { selectedTab = WorkspaceTab.CHAT },
+                        onImportFiles = { parentDir ->
+                            pendingImportTargetDir = parentDir
+                            importFilesLauncher.launch(arrayOf("*/*"))
+                        },
+                        fileImporting = state.fileImporting,
+                        fileImportProgress = state.fileImportProgress,
+                        fileImportMessage = state.fileImportMessage,
+                        onCancelFileImport = onCancelFileImport,
                     )
                     WorkspaceTab.TERMINAL -> TerminalScreen(
                         lines = state.projectTerminalLines,

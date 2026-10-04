@@ -17,6 +17,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -62,6 +63,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Info
@@ -84,6 +86,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -311,6 +314,11 @@ fun EditorScreen(
     onDeleteEntry: (path: String) -> Unit,
     onRefreshFiles: () -> Unit,
     onBackToChat: () -> Unit,
+    onImportFiles: ((parentDir: String) -> Unit)? = null,
+    fileImporting: Boolean = false,
+    fileImportProgress: Float? = null,
+    fileImportMessage: String? = null,
+    onCancelFileImport: (() -> Unit)? = null,
 ) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -427,6 +435,13 @@ fun EditorScreen(
                         crudInputText = ""
                         activeCrudAction = EditorCrudAction.NewFolder(parentDir)
                     },
+                    onImportFiles = { parentDir ->
+                        onImportFiles?.invoke(parentDir)
+                    },
+                    fileImporting = fileImporting,
+                    fileImportProgress = fileImportProgress,
+                    fileImportMessage = fileImportMessage,
+                    onCancelFileImport = onCancelFileImport,
                     onRename = { path, name ->
                         crudInputText = name
                         activeCrudAction = EditorCrudAction.Rename(path, name)
@@ -1371,6 +1386,11 @@ private fun EditorFileTreeSidebar(
     onSelectFile: (String) -> Unit,
     onNewFile: (parentDir: String) -> Unit,
     onNewFolder: (parentDir: String) -> Unit,
+    onImportFiles: (parentDir: String) -> Unit = {},
+    fileImporting: Boolean = false,
+    fileImportProgress: Float? = null,
+    fileImportMessage: String? = null,
+    onCancelFileImport: (() -> Unit)? = null,
     onRename: (path: String, name: String) -> Unit,
     onDelete: (path: String, name: String, isDir: Boolean) -> Unit,
     onRefresh: () -> Unit,
@@ -1392,8 +1412,59 @@ private fun EditorFileTreeSidebar(
                 IconButton(onClick = { onNewFolder("") }, modifier = Modifier.size(28.dp)) {
                     Icon(Icons.Default.CreateNewFolder, contentDescription = "New Folder in Root", tint = VSCODE_TEXT, modifier = Modifier.size(16.dp))
                 }
+                IconButton(onClick = { onImportFiles("") }, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Default.FileUpload, contentDescription = "Import Files in Root", tint = VSCODE_TEXT, modifier = Modifier.size(16.dp))
+                }
                 IconButton(onClick = onRefresh, modifier = Modifier.size(28.dp)) {
                     Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = VSCODE_TEXT, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+
+        if (fileImporting) {
+            Surface(
+                color = VSCODE_BG,
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, VSCODE_BORDER),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            ) {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            fileImportMessage ?: "Importing files…",
+                            fontSize = 11.sp,
+                            color = VSCODE_TEXT,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (onCancelFileImport != null) {
+                            Text(
+                                "Cancel",
+                                fontSize = 11.sp,
+                                color = PocketOrange,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.clickable { onCancelFileImport() }.padding(4.dp),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    if (fileImportProgress != null) {
+                        LinearProgressIndicator(
+                            progress = { fileImportProgress },
+                            modifier = Modifier.fillMaxWidth().height(4.dp),
+                            color = PocketOrange,
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().height(4.dp),
+                            color = PocketOrange,
+                        )
+                    }
                 }
             }
         }
@@ -1520,6 +1591,14 @@ private fun EditorFileTreeSidebar(
                                     onClick = {
                                         contextMenuEntry = null
                                         onNewFolder(entry.path)
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Import Files Here") },
+                                    leadingIcon = { Icon(Icons.Default.FileUpload, contentDescription = null) },
+                                    onClick = {
+                                        contextMenuEntry = null
+                                        onImportFiles(entry.path)
                                     },
                                 )
                             }
