@@ -31,14 +31,39 @@ class OpencodeRuntimeTest {
     }
 
     @Test
+    fun openCodeZenDefaultBaseUrl() {
+        assertEquals("https://opencode.ai/zen/v1", ProviderKind.OPENCODE_ZEN.defaultBaseUrl)
+    }
+
+    @Test
     fun errorMapperTranslatesKnownFailures() {
         assertEquals(
             "API key was rejected by the provider. Please check your saved key.",
             OpencodeErrorMapper.format("HTTP 401: Unauthorized API key"),
         )
         assertEquals(
+            "API key was rejected by the provider. Please check your saved key.",
+            OpencodeErrorMapper.format("Reconnect OpenCode Console to continue.", status = 401, errorType = "provider.auth"),
+        )
+        assertEquals(
+            "API key was rejected by the provider. Please check your saved key.",
+            OpencodeErrorMapper.format("User not found.", status = 401, errorType = "provider.auth"),
+        )
+        assertEquals(
+            "Provider credits exhausted. Please add credits or switch to a free model.",
+            OpencodeErrorMapper.format("Insufficient credits", status = 402, errorType = "provider.quota"),
+        )
+        assertEquals(
+            "Rate limit reached. Please wait a moment before trying again or switch to another model.",
+            OpencodeErrorMapper.format("Too many requests", status = 429, errorType = "provider.rate-limit"),
+        )
+        assertEquals(
             "Rate limit reached. Please wait a moment before trying again or switch to another model.",
             OpencodeErrorMapper.format("Error: 429 rate_limit_exceeded for free tier"),
+        )
+        assertEquals(
+            "The selected model is unavailable for this provider: Model unavailable: openrouter/auto",
+            OpencodeErrorMapper.format("Model unavailable: openrouter/auto", errorType = "provider.no-route"),
         )
         assertEquals(
             "Network connection failed. Please check your internet connection and retry.",
@@ -73,8 +98,11 @@ class OpencodeRuntimeTest {
         assertEquals("bash", (tool as OpencodeParsedEvent.ToolCompleted).name)
         assertEquals("ls", tool.detail)
 
-        val err = OpencodeEventParser.parse("""{"type":"error","error":{"message":"Something broke"}}""")
+        val err = OpencodeEventParser.parse("""{"type":"error","error":{"message":"Reconnect OpenCode Console to continue.","status":401,"type":"provider.auth"}}""")
         assertTrue(err is OpencodeParsedEvent.Error)
-        assertEquals("Something broke", (err as OpencodeParsedEvent.Error).message)
+        val parsedErr = err as OpencodeParsedEvent.Error
+        assertEquals("Reconnect OpenCode Console to continue.", parsedErr.message)
+        assertEquals(401, parsedErr.status)
+        assertEquals("provider.auth", parsedErr.errorType)
     }
 }

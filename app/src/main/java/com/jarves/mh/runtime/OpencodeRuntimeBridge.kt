@@ -27,19 +27,30 @@ internal sealed interface OpencodeParsedEvent {
     data class TextDelta(val text: String) : OpencodeParsedEvent
     data class ToolStarted(val name: String, val detail: String) : OpencodeParsedEvent
     data class ToolCompleted(val name: String, val detail: String) : OpencodeParsedEvent
-    data class Error(val message: String) : OpencodeParsedEvent
+    data class Error(val message: String, val status: Int? = null, val errorType: String? = null) : OpencodeParsedEvent
     data class Finished(val reason: String?) : OpencodeParsedEvent
 }
 
 internal object OpencodeErrorMapper {
-    fun format(raw: String): String {
+    fun format(raw: String, status: Int? = null, errorType: String? = null): String {
         val lower = raw.lowercase()
+        val typeLower = errorType.orEmpty().lowercase()
         return when {
-            "401" in lower || "unauthorized" in lower || "invalid api key" in lower || "bad key" in lower || "authentication failed" in lower ->
+            status == 401 || status == 403 || typeLower == "provider.auth" ||
+                "401" in lower || "unauthorized" in lower || "invalid api key" in lower || "bad key" in lower ||
+                "authentication failed" in lower || "reconnect opencode console" in lower || "user not found" in lower ->
                 "API key was rejected by the provider. Please check your saved key."
-            "429" in lower || "rate limit" in lower || "rate_limit" in lower || "quota" in lower || "too many requests" in lower || "resource exhausted" in lower ->
+            status == 402 || typeLower == "provider.quota" ||
+                "402" in lower || "credit" in lower || "payment" in lower || "balance" in lower ->
+                "Provider credits exhausted. Please add credits or switch to a free model."
+            status == 429 || typeLower == "provider.rate-limit" ||
+                "429" in lower || "rate limit" in lower || "rate_limit" in lower || "quota" in lower ||
+                "too many requests" in lower || "resource exhausted" in lower ->
                 "Rate limit reached. Please wait a moment before trying again or switch to another model."
-            "network" in lower || "enotfound" in lower || "econnrefused" in lower || "connection refused" in lower || "fetch failed" in lower || "etimedout" in lower || "dns" in lower ->
+            typeLower == "provider.no-route" || "model unavailable" in lower ->
+                "The selected model is unavailable for this provider: $raw"
+            "network" in lower || "enotfound" in lower || "econnrefused" in lower || "connection refused" in lower ||
+                "fetch failed" in lower || "etimedout" in lower || "dns" in lower ->
                 "Network connection failed. Please check your internet connection and retry."
             "exec format error" in lower || "architecture" in lower ->
                 "OpenCode binary is only supported on 64-bit ARM (aarch64) devices."
@@ -85,8 +96,10 @@ internal object OpencodeEventParser {
             }
             "error" -> {
                 val err = root.optJSONObject("error")
+                val status = err?.optInt("status", 0)?.takeIf { it > 0 }
+                val errType = err?.optString("type")?.takeIf { it.isNotBlank() }
                 val msg = err?.optString("message") ?: root.optString("message", "OpenCode execution failed")
-                OpencodeParsedEvent.Error(msg)
+                OpencodeParsedEvent.Error(msg, status, errType)
             }
             else -> null
         }
@@ -144,7 +157,23 @@ class OpencodeRuntimeBridge(
             emitFailure(sessionId, "Saved key could not be read. Please re-enter it.")
             return@withContext sessionId
         }
-        if (provider.kind == com.jarves.mh.model.ProviderKind.LLM_ROUTER && secret.isBlank()) {
+
+        val (effectiveProviderKind, effectiveSecret) = if (provider.kind == com.jarves.mh.model.ProviderKind.OPENCODE_ZEN && secret.isBlank()) {
+            val fallbackKey = try {
+                secretProvider(ProviderProfile(com.jarves.mh.model.ProviderKind.LLM_ROUTER))?.let { sanitizeApiKey(it) }.orEmpty()
+            } catch (e: KeyDecryptionException) {
+                ""
+            }
+            if (fallbackKey.isNotBlank()) {
+                com.jarves.mh.model.ProviderKind.LLM_ROUTER to fallbackKey
+            } else {
+                com.jarves.mh.model.ProviderKind.OPENCODE_ZEN to ""
+            }
+        } else {
+            provider.kind to secret
+        }
+
+        if (effectiveProviderKind == com.jarves.mh.model.ProviderKind.LLM_ROUTER && effectiveSecret.isBlank()) {
             emitFailure(sessionId, "OpenRouter requires an API key. Please add your key in Settings → Coding agent.")
             return@withContext sessionId
         }
@@ -162,14 +191,21 @@ class OpencodeRuntimeBridge(
 
             val existingSession = sessionIdProvider(projectId)
             val modelArg = when {
-                provider.model.isBlank() -> null
-                provider.kind == com.jarves.mh.model.ProviderKind.LLM_ROUTER -> {
-                    if (provider.model.startsWith("openrouter/")) provider.model else "openrouter/${provider.model}"
+                effectiveProviderKind == com.jarves.mh.model.ProviderKind.LLM_ROUTER -> {
+                    when {
+                        provider.model.startsWith("openrouter/") -> provider.model
+                        provider.model.isNotBlank() && !provider.model.startsWith("opencode/") -> "openrouter/${provider.model}"
+                        else -> "openrouter/~anthropic/claude-sonnet-latest"
+                    }
                 }
                 provider.kind == com.jarves.mh.model.ProviderKind.OPENCODE_ZEN -> {
-                    if (provider.model.startsWith("opencode/")) provider.model else "opencode/${provider.model}"
+                    when {
+                        provider.model.isBlank() -> null
+                        provider.model.startsWith("opencode/") -> provider.model
+                        else -> "opencode/${provider.model}"
+                    }
                 }
-                else -> provider.model
+                else -> provider.model.takeIf { it.isNotBlank() }
             }
             val command = buildList {
                 add(RuntimeInstaller.OPENCODE_GUEST_PATH)
@@ -189,11 +225,22 @@ class OpencodeRuntimeBridge(
             val environment = linkedMapOf(
                 "TERM" to "xterm-256color",
             )
-            if (provider.kind == com.jarves.mh.model.ProviderKind.OPENCODE_ZEN && secret.isNotBlank()) {
-                environment["OPENCODE_API_KEY"] = secret
-            } else if (provider.kind == com.jarves.mh.model.ProviderKind.LLM_ROUTER && secret.isNotBlank()) {
-                environment["OPENROUTER_API_KEY"] = secret
+            if (effectiveProviderKind == com.jarves.mh.model.ProviderKind.OPENCODE_ZEN && effectiveSecret.isNotBlank()) {
+                environment["OPENCODE_API_KEY"] = effectiveSecret
+            } else if (effectiveProviderKind == com.jarves.mh.model.ProviderKind.LLM_ROUTER && effectiveSecret.isNotBlank()) {
+                environment["OPENROUTER_API_KEY"] = effectiveSecret
             }
+
+            // Ensure no other provider's env vars leak into opencode process
+            listOf(
+                "OPENAI_API_KEY",
+                "OPENAI_BASE_URL",
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_BASE_URL",
+                "DEEPSEEK_API_KEY",
+                "DEEPSEEK_BASE_URL",
+            ).forEach { environment.remove(it) }
 
             val process = installer.process(
                 installed.proot,
@@ -219,7 +266,9 @@ class OpencodeRuntimeBridge(
                     }
                     is OpencodeParsedEvent.ToolStarted -> eventBus.emit(RuntimeEvent.ToolStarted(sessionId, event.name, event.detail))
                     is OpencodeParsedEvent.ToolCompleted -> eventBus.emit(RuntimeEvent.ToolCompleted(sessionId, event.name, event.detail))
-                    is OpencodeParsedEvent.Error -> throw OpencodeSessionException(OpencodeErrorMapper.format(event.message))
+                    is OpencodeParsedEvent.Error -> throw OpencodeSessionException(
+                        OpencodeErrorMapper.format(event.message, event.status, event.errorType)
+                    )
                     is OpencodeParsedEvent.Finished -> Unit
                     null -> Unit
                 }
