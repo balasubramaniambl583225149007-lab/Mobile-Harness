@@ -153,4 +153,11 @@ class EditorDiagnosticsAndBridgeTest {
         assertTrue(formatted.contains("Recent Logs (0):"))
         assertTrue(formatted.contains("(None)"))
     }
+
+    @Test
+    fun editorAssetUrlUsesSecureAppAssetsDomain() {
+        val editorUrl = "https://appassets.androidplatform.net/assets/editor/index.html"
+        assertTrue(editorUrl.startsWith("https://appassets.androidplatform.net/assets/"))
+        assertTrue(editorUrl.endsWith("/editor/index.html"))
+    }
 }

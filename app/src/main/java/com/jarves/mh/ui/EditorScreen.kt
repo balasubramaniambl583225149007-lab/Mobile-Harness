@@ -8,9 +8,11 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.WebViewAssetLoader
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -1013,6 +1015,9 @@ private fun CodeMirrorWebView(
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
+            val assetLoader = WebViewAssetLoader.Builder()
+                .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(ctx))
+                .build()
             WebView(ctx).apply {
                 setBackgroundColor(0xFF1E1E1E.toInt())
                 settings.apply {
@@ -1024,9 +1029,9 @@ private fun CodeMirrorWebView(
                     useWideViewPort = false
                     loadWithOverviewMode = true
                     setSupportZoom(false)
-                    allowFileAccess = true
-                    allowFileAccessFromFileURLs = true
-                    allowUniversalAccessFromFileURLs = true
+                    allowFileAccess = false
+                    allowFileAccessFromFileURLs = false
+                    allowUniversalAccessFromFileURLs = false
                 }
                 webChromeClient = object : WebChromeClient() {
                     override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
@@ -1041,9 +1046,14 @@ private fun CodeMirrorWebView(
                     }
                 }
                 webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                        val uri = request?.url ?: return null
+                        return assetLoader.shouldInterceptRequest(uri)
+                    }
+
                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                         val url = request?.url?.toString().orEmpty()
-                        return !url.startsWith("file:///android_asset/editor/")
+                        return !url.startsWith("https://appassets.androidplatform.net/assets/editor/")
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
@@ -1066,7 +1076,7 @@ private fun CodeMirrorWebView(
                     }
                 }
                 addJavascriptInterface(bridge, "AndroidBridge")
-                loadUrl("file:///android_asset/editor/index.html")
+                loadUrl("https://appassets.androidplatform.net/assets/editor/index.html")
                 onWebViewCreated(this)
             }
         },
